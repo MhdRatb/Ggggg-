@@ -9,7 +9,6 @@ from threading import Lock
 from dotenv import load_dotenv
 
 load_dotenv()
-
 API_KEY = os.getenv("API_KEY")
 G2BULK_API_KEY = os.getenv("G2BULK_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
