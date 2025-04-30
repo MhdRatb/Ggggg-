@@ -105,7 +105,100 @@ if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_code'"):
 
 
 bot = telebot.TeleBot(API_KEY)
+# ============= إضافة الدوال للنسخ الاحتياطي والاستعادة =============
+import shutil
 
+def close_db_connection():
+    """إغلاق اتصالات قاعدة البيانات بشكل آمن"""
+    global conn
+    if conn:
+        conn.close()
+        conn = None
+
+@bot.callback_query_handler(func=lambda call: call.data == 'backup_db')
+def backup_database(call):
+    try:
+        # إغلاق الاتصال الحالي
+        close_db_connection()
+        
+        # إنشاء نسخة مؤقتة
+        backup_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_backup_name = f"temp_backup_{backup_time}.db"
+        shutil.copyfile('wallet.db', temp_backup_name)
+        
+        # إعادة فتح الاتصال
+        global conn
+        conn = sqlite3.connect('wallet.db', check_same_thread=False)
+        
+        # إرسال الملف
+        with open(temp_backup_name, 'rb') as f:
+            bot.send_document(
+                chat_id=ADMIN_ID,
+                document=f,
+                caption=f'🔐 Backup: {backup_time}',
+                timeout=30
+            )
+        
+        # حذف النسخة المؤقتة
+        os.remove(temp_backup_name)
+        
+        bot.answer_callback_query(call.id, "✅ تم إنشاء النسخة الاحتياطية")
+    except Exception as e:
+        print(f"Backup Error: {str(e)}")
+        bot.answer_callback_query(call.id, f"❌ فشل النسخ الاحتياطي: {str(e)}")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'restore_db')
+def restore_database(call):
+    try:
+        msg = bot.send_message(
+            call.message.chat.id,
+            "📤 أرسل ملف النسخة الاحتياطية (يجب أن يكون بصيغة .db):",
+            reply_markup=types.ForceReply(selective=True)
+        )
+        bot.register_next_step_handler(msg, process_restore)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ خطأ: {str(e)}")
+
+def process_restore(message):
+    try:
+        if not message.document:
+            raise ValueError("يجب إرسال ملف .db")
+            
+        if not message.document.file_name.endswith('.db'):
+            raise ValueError("الملف غير صالح! يجب أن يكون بصيغة .db")
+        
+        # إغلاق جميع الاتصالات
+        close_db_connection()
+        
+        # تنزيل الملف
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        # حفظ الملف المؤقت
+        temp_name = f"restore_temp_{datetime.now().strftime('%Y%m%d%H%M%S')}.db"
+        with open(temp_name, 'wb') as f:
+            f.write(downloaded_file)
+        
+        # التحقق من صحة الملف
+        test_conn = sqlite3.connect(temp_name)
+        test_conn.cursor().execute("SELECT name FROM sqlite_master WHERE type='table';")
+        test_conn.close()
+        
+        # استبدال الملف الرئيسي
+        shutil.move(temp_name, 'wallet.db')
+        
+        # إعادة فتح الاتصال
+        global conn
+        conn = sqlite3.connect('wallet.db', check_same_thread=False)
+        
+        bot.send_message(message.chat.id, "✅ تم استعادة النسخة بنجاح!")
+    except sqlite3.DatabaseError as e:
+        bot.send_message(message.chat.id, f"❌ ملف تالف: {str(e)}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ فشل الاستعادة: {str(e)}")
+    finally:
+        if os.path.exists(temp_name):
+            os.remove(temp_name)
 # ============= وظائف المساعدة =============
 def is_admin(user_id):
     return user_id == ADMIN_ID
@@ -739,6 +832,52 @@ def confirm_product_requires_id(call):
         
     except Exception as e:
         bot.send_message(call.message.chat.id, f"❌ حدث خطأ: {str(e)}")
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_purchase_'))
+def handle_purchase_confirmation(call):
+    try:
+        parts = call.data.split('_')
+        offer_id = parts[2]
+        player_id = parts[3]
+        price = int(parts[4])
+        
+        # خصم الرصيد وإتمام الشراء
+        user_id = call.from_user.id
+        if get_balance(user_id) >= price:
+            update_balance(user_id, -price)
+            # ... (كود إتمام الشراء الحالي)
+            bot.edit_message_text("✅ تمت عملية الشراء بنجاح!", call.message.chat.id, call.message.message_id)
+        else:
+            bot.answer_callback_query(call.id, "❌ رصيدك غير كافي!")
+            
+    except Exception as e:
+        print(f"Error in purchase confirmation: {str(e)}")
+
+def process_topup_purchase(message, offer_id):
+    try:
+        player_id = message.text.strip()
+        # ... (الكود الحالي للحصول على تفاصيل العرض)
+        
+        # إنشاء واجهة المعاينة
+        preview_text = (
+            f"🛒 تأكيد عملية الشراء\n\n"
+            f"📌 العرض: {offer_id['title']}\n\n"
+            f"👤 رقم اللاعب: {player_id}"
+        )
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ متابعة الشراء", callback_data=f'confirm_purchase_{offer_id}_{player_id}'),
+            types.InlineKeyboardButton("❌ إلغاء", callback_data='cancel_purchase')
+        )
+        
+        bot.send_message(message.chat.id, preview_text, reply_markup=markup)
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'cancel_purchase')
+def handle_purchase_cancel(call):
+    bot.edit_message_text("❌ تم إلغاء العملية", call.message.chat.id, call.message.message_id)
 @bot.message_handler(func=lambda msg: msg.text == 'طلباتي 🗂️')
 def show_user_orders(message):
     user_id = message.from_user.id
@@ -1535,13 +1674,49 @@ def show_admin_panel(message):
         types.InlineKeyboardButton('إدارة المنتجات اليدوية', callback_data='manage_manual_products')
     )
     markup.row(
-        types.InlineKeyboardButton('إدارة الطلبات اليدوية', callback_data='manage_manual_orders')
+        types.InlineKeyboardButton('إدارة الطلبات اليدوية', callback_data='manage_manual_orders'),
+        types.InlineKeyboardButton('كود الشحن', callback_data='edit_recharge_code')
     )
     markup.row(
         types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot')
     )
+    markup.row(
+    types.InlineKeyboardButton('📦 نسخ احتياطي', callback_data='backup_db'),
+    types.InlineKeyboardButton('🔄 استعادة', callback_data='restore_db')
+    )
     bot.send_message(message.chat.id, "⚙️ لوحة التحكم الإدارية:", reply_markup=markup)
+@bot.callback_query_handler(func=lambda call: call.data == 'backup_db')
+def backup_database(call):
+    try:
+        backup_time = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_name = f"backup_{backup_time}.db"
+        with open('wallet.db', 'rb') as f:
+            bot.send_document(ADMIN_ID, f, caption=f"Backup {backup_time}")
+        bot.answer_callback_query(call.id, "✅ تم إنشاء النسخة الاحتياطية")
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ خطأ: {str(e)}")
 
+@bot.callback_query_handler(func=lambda call: call.data == 'restore_db')
+def restore_database(call):
+    msg = bot.send_message(call.message.chat.id, "أرسل ملف النسخة الاحتياطية:")
+    bot.register_next_step_handler(msg, process_restore)
+
+def process_restore(message):
+    try:
+        if message.document:
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            with open('wallet.db', 'wb') as f:
+                f.write(downloaded_file)
+                
+            bot.send_message(message.chat.id, "✅ تم استعادة النسخة الاحتياطية بنجاح")
+            # إعادة الاتصال بقاعدة البيانات
+            global conn
+            conn.close()
+            conn = sqlite3.connect('wallet.db', check_same_thread=False)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ فشل الاستعادة: {str(e)}")
 def show_editable_categories(message):
     response = requests.get(f"{BASE_URL}category")
     if response.status_code == 200:
