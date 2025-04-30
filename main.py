@@ -270,12 +270,22 @@ def send_order_confirmation(user_id, order_id, product_name, price, player_id=No
         print(f"Error sending confirmation: {str(e)}")
 def notify_user_balance_update(user_id, amount, new_balance, admin_note=None):
     try:
-        message = (
-            f"🎉 تم تحديث رصيدك بنجاح!\n\n"
-            f"💰 المبلغ المضاف: {amount} ل.س\n"
-            f"💳 الرصيد الجديد: {new_balance} ل.س\n"
-        )
-        
+        if amount > 0:
+            message = (
+                f"🎉 تم تحديث رصيدك بنجاح!\n\n"
+                f"💰 المبلغ المضاف: {amount} ل.س\n"
+                f"💳 الرصيد الجديد: {new_balance} ل.س\n"
+            )
+        else:
+            message = (
+                f"⚠️ تم خصم مبلغ من رصيدك\n\n"
+                f"💰 المبلغ المخصوم: {abs(amount)} ل.س\n"
+                f"💳 الرصيد الجديد: {new_balance} ل.س\n"
+            )
+            
+        if admin_note:
+            message += f"\n📝 ملاحظة الإدارة: {admin_note}"
+            
         bot.send_message(user_id, message)
     except Exception as e:
         print(f"فشل في إرسال الإشعار للمستخدم {user_id}: {str(e)}")
@@ -493,6 +503,11 @@ def add_manual_product(call):
         call.message.message_id,
         reply_markup=markup
     )
+@bot.callback_query_handler(func=lambda call: call.data == 'deduct_balance' and is_admin(call.from_user.id))
+def handle_deduct_balance(call):
+    msg = bot.send_message(call.message.chat.id, "أرسل آيدي المستخدم والمبلغ المطلوب خصمه (مثال: 123456789 50000):")
+    bot.register_next_step_handler(msg, process_balance_deduction)
+    
 @bot.callback_query_handler(func=lambda call: call.data == 'rejected_orders')
 def show_rejected_orders(call):
     orders = safe_db_execute("""
@@ -1371,6 +1386,50 @@ def show_products(message, category_id):
                     callback_data=f'product_{prod["id"]}'
                 ))
         bot.send_message(message.chat.id, "المنتجات المتاحة (مرتبة من الأقل سعراً):", reply_markup=markup)
+def process_balance_deduction(message):
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            raise ValueError("صيغة غير صحيحة")
+            
+        user_id = int(parts[0])
+        amount = int(parts[1])
+        
+        if amount <= 0:
+            bot.send_message(message.chat.id, "❌ المبلغ يجب أن يكون أكبر من الصفر!")
+            return
+            
+        # التحقق من رصيد المستخدم الحالي
+        current_balance = get_balance(user_id)
+        if current_balance < amount:
+            bot.send_message(message.chat.id, f"❌ رصيد المستخدم غير كافي! الرصيد الحالي: {current_balance} ل.س")
+            return
+            
+        # تنفيذ عملية الخصم
+        success = update_balance(user_id, -amount)
+        
+        if success:
+            # إرسال إشعار للمستخدم
+            try:
+                new_balance = get_balance(user_id)
+                notify_msg = (
+                    f"⚠️ تم خصم مبلغ من رصيدك\n\n"
+                    f"💰 المبلغ المخصوم: {amount} ل.س\n"
+                    f"💳 الرصيد الجديد: {new_balance} ل.س\n\n"
+                    f"للاستفسار، يرجى التواصل مع الإدارة"
+                )
+                bot.send_message(user_id, notify_msg)
+            except Exception as e:
+                print(f"فشل في إرسال الإشعار للمستخدم: {str(e)}")
+            
+            bot.send_message(message.chat.id, f"✅ تم خصم {amount} ل.س من رصيد المستخدم {user_id} بنجاح")
+        else:
+            bot.send_message(message.chat.id, "❌ فشل في عملية الخصم")
+            
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال أرقام صحيحة بالصيغة الصحيحة!\nمثال: 123456789 50000")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 def show_categories(message):
     active_categories = safe_db_execute("SELECT category_id FROM active_categories")
     active_ids = [cat[0] for cat in active_categories] if active_categories else []
@@ -1468,8 +1527,8 @@ def show_admin_panel(message):
         types.InlineKeyboardButton('إدارة الفئات', callback_data='manage_categories')
     )
     markup.row(
-        types.InlineKeyboardButton('تعديل أسماء الفئات', callback_data='edit_category_names'),
-        types.InlineKeyboardButton('تعديل كود الشحن', callback_data='edit_recharge_code')  # تغيير هنا
+        types.InlineKeyboardButton('خصم من المستخدم', callback_data='deduct_balance'),  # الزر الجديد
+        types.InlineKeyboardButton('تعديل أسماء الفئات', callback_data='edit_category_names')
     )
     markup.row(
         types.InlineKeyboardButton('إدارة الفئات اليدوية', callback_data='manage_manual_categories'),
@@ -1567,8 +1626,8 @@ def handle_recharge_request(message):
         # إنشاء الرسالة مع تعليمات واضحة
         recharge_msg = (
             " لتعبة رصيدك، يرجى اتباع الخطوات التالية:\n\n"
-            f" قم بإرسال المبلغ إلى كود السيريتل كاش: <code>{recharge_code}</code>\n\n"
-            " أرسل المبلغ المرسل :\n"
+            f" قم بإرسال المبلغ إلى كود سيريتل كاش: <code>{recharge_code}</code>\n\n"
+            "<b> أدخل المبلغ المرسل </b>:\n"
         )
         
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1631,8 +1690,8 @@ def notify_admin_recharge_request(user_id, username, amount, proof_type, proof_c
             f"🔄 طلب تعبئة رصيد جديد\n\n"
             f"👤 آيدي المستخدم: {user_id}\n"
             f"👤 معرف المستخدم: @{username}\n"
+            f"📝 نوع الإثبات: {proof_type}\n\n"
             f"💰 المبلغ المرسل: {amount} ل.س\n"
-            f"📝 نوع الإثبات: {proof_type}\n"
         )
 
         # إرسال الصورة مع الأزرار في نفس الرسالة (إذا كانت صورة)
