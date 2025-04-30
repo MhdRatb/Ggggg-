@@ -2,6 +2,7 @@ import telebot
 import requests
 import sqlite3
 import json
+import os
 from telebot import types
 from datetime import datetime
 from threading import Lock
