@@ -92,6 +92,8 @@ if not safe_db_execute("SELECT * FROM bot_settings WHERE key='is_paused'"):
 
 if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_code'"):
     safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('recharge_code', 'GGSTORE123')")
+
+API_KEY = "7830539510:AAHorH0wI2UeqCLlxAqFtPVlQ2spSIa3wo8"
 bot = telebot.TeleBot(API_KEY)
 
 # ============= وظائف المساعدة =============
