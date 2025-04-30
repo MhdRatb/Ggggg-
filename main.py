@@ -5,7 +5,7 @@ import json
 from telebot import types
 from datetime import datetime
 from threading import Lock
-from config import *
+
 # ============= إعداد قاعدة البيانات =============
 conn = sqlite3.connect('wallet.db', check_same_thread=False)
 db_lock = Lock()
