@@ -13,7 +13,7 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 G2BULK_API_KEY = os.getenv("G2BULK_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
-ADMIN_ID = os.getenv("ADMIN_ID")
+ADMIN_ID = 5134156042
 
 DEFAULT_EXCHANGE_RATE = 15000
 # ============= إعداد قاعدة البيانات =============
