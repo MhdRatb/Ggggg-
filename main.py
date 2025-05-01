@@ -851,28 +851,7 @@ def handle_purchase_confirmation(call):
     except Exception as e:
         print(f"Error in purchase confirmation: {str(e)}")
 
-def process_topup_purchase(message, offer_id):
-    try:
-        player_id = message.text.strip()
-        # ... (الكود الحالي للحصول على تفاصيل العرض)
-        
-        # إنشاء واجهة المعاينة
-        preview_text = (
-            f"🛒 تأكيد عملية الشراء\n\n"
-            f"📌 العرض: {offer_id['title']}\n\n"
-            f"👤 رقم اللاعب: {player_id}"
-        )
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✅ متابعة الشراء", callback_data=f'confirm_purchase_{offer_id}_{player_id}'),
-            types.InlineKeyboardButton("❌ إلغاء", callback_data='cancel_purchase')
-        )
-        
-        bot.send_message(message.chat.id, preview_text, reply_markup=markup)
-        
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'cancel_purchase')
 def handle_purchase_cancel(call):
@@ -1236,7 +1215,95 @@ def process_reject_reason(message, order_id):
             message.chat.id,
             f"❌ حدث خطأ أثناء رفض الطلب: {str(e)}"
         )
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_topup_'))
+def handle_topup_confirmation(call):
+    try:
+        parts = call.data.split('_')
+        offer_id = parts[2]
+        player_id = parts[3]
+        user_id = call.from_user.id
+        
+        # جلب تفاصيل العرض
+        headers = {'X-API-Key': G2BULK_API_KEY}
+        response = requests.get(
+            f"{BASE_URL}topup/pubgMobile/offers",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            bot.answer_callback_query(call.id, "❌ فشل في جلب تفاصيل العرض")
+            return
+            
+        offers = response.json().get('offers', [])
+        offer = next((o for o in offers if str(o['id']) == offer_id), None)
+        
+        if not offer:
+            bot.answer_callback_query(call.id, "❌ العرض غير متوفر")
+            return
+            
+        price_syp = convert_to_syp(offer['unit_price'])
+        
+        # التحقق من الرصيد
+        if get_balance(user_id) < price_syp:
+            bot.answer_callback_query(call.id, "❌ رصيدك غير كافي!")
+            return
+            
+        # تنفيذ عملية الشراء
+        purchase_response = requests.post(
+            f"{BASE_URL}topup/pubgMobile/offers/{offer_id}/purchase",
+            json={"quantity": 1, "player_id": player_id},
+            headers={'X-API-Key': G2BULK_API_KEY},
+            timeout=15
+        )
+        
+        if purchase_response.status_code == 200:
+            update_balance(user_id, -price_syp)
+            result = purchase_response.json()
+            
+            # إرسال تأكيد للمستخدم
+            bot.edit_message_text(
+                f"✅ تمت عملية الشراء بنجاح!\n\n"
+                f"📌 العرض: {offer['title']}\n"
+                f"👤 رقم اللاعب: {player_id}\n"
+                f"💳 المبلغ: {price_syp} ل.س\n"
+                f"🆔 رقم العملية: {result.get('topup_id', 'غير متوفر')}",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # إشعار الأدمن
+            admin_msg = (
+                f"🛒 عملية شراء جديدة\n\n"
+                f"👤 المستخدم: {user_id}\n"
+                f"🎮 العرض: {offer['title']}\n"
+                f"🆔 اللاعب: {player_id}\n"
+                f"💰 المبلغ: {price_syp} ل.س\n"
+                f"📌 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
+            )
+            bot.send_message(ADMIN_ID, admin_msg)
+        else:
+            error_msg = purchase_response.json().get('message', 'فشلت العملية')
+            bot.edit_message_text(
+                f"❌ فشلت العملية: {error_msg}",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+    except Exception as e:
+        bot.edit_message_text(
+            "❌ حدث خطأ غير متوقع! يرجى المحاولة لاحقاً",
+            call.message.chat.id,
+            call.message.message_id
+        )
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_topup_'))
+def handle_topup_cancel(call):
+    bot.edit_message_text(
+        "❌ تم إلغاء العملية",
+        call.message.chat.id,
+        call.message.message_id
+    )
 @bot.callback_query_handler(func=lambda call: call.data.startswith('send_order_details_'))
 def send_order_details_to_user(call):
     order_id = call.data.split('_')[3]
@@ -1827,16 +1894,19 @@ def ask_recharge_amount(message):
     try:
         # التحقق من أن الرسالة تحتوي على رقم صحيح موجب
         amount = int(message.text)
+        
+        # التحقق من أن المبلغ ضمن النطاق المسموح
         if amount <= 0:
-            raise ValueError
+            raise ValueError("المبلغ يجب أن يكون أكبر من الصفر")
+        if amount > 549000:
+            raise ValueError("المبلغ الأقصى المسموح به هو 549,000 ل.س")
         
         # طلب رقم العملية أو الصورة
         msg = bot.send_message(
             message.chat.id,
-            f"💰 المبلغ المرسل: {amount} ل.س\n\n"
-            "أدخل رقم العملية أو سكرين شوت للتحويل :\n"
-
-            "⚠️ يرجى التأكد من وضوح الصورة قبل ارسالها",
+            f"💰 المبلغ المرسل: {amount:,} ل.س\n\n"
+            "أدخل رقم العملية أو أرسل صورة للإشعار:\n\n"
+            "⚠️ يرجى التأكد من وضوح الصورة قبل إرسالها",
             parse_mode='Markdown',
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -1844,14 +1914,29 @@ def ask_recharge_amount(message):
         # ننتقل لخطوة طلب الإثبات مع حفظ المبلغ
         bot.register_next_step_handler(msg, ask_transaction_id, amount)
         
-    except ValueError:
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ يرجى إدخال مبلغ صحيح أكبر من الصفر!\n"
-            "مثال: 50000",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
+    except ValueError as e:
+        error_msg = str(e)
+        if "المبلغ الأقصى" in error_msg:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ المبلغ الأقصى المسموح به هو 549,000 ل.س\n"
+                "يرجى إدخال مبلغ أقل أو تقسيم التحويل على دفعات",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+        else:
+            msg = bot.send_message(
+                message.chat.id,
+                "❌ يرجى إدخال مبلغ صحيح بين 1 و549,000 ل.س!\n"
+                "مثال: 50000",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
         bot.register_next_step_handler(msg, ask_recharge_amount)
+    except Exception as e:
+        bot.send_message(
+            message.chat.id,
+            f"❌ حدث خطأ: {str(e)}\nيرجى المحاولة مرة أخرى",
+            reply_markup=main_menu(message.from_user.id)
+        )
 def notify_admin_recharge_request(user_id, username, amount, proof_type, proof_content):
     try:
         markup = types.InlineKeyboardMarkup()
@@ -2131,158 +2216,51 @@ def process_topup_purchase(message, offer_id):
             bot.send_message(message.chat.id, "❌ رقم اللاعب غير صالح! يجب أن يحتوي على 8 إلى 12 رقمًا فقط.")
             return
 
-        headers = {
-            'X-API-Key': G2BULK_API_KEY,
-            'Content-Type': 'application/json'
-        }
-
-        # 1. جلب تفاصيل جميع العروض أولاً
-        try:
-            print("🔍 جلب قائمة العروض...")
-            offers_response = requests.get(
-                "https://api.g2bulk.com/v1/topup/pubgMobile/offers",
-                headers=headers,
-                timeout=10
-            )
-
-            # تسجيل الاستجابة للأغراض التشخيصية
-            print(f"📊 استجابة العروض: {offers_response.status_code} - {offers_response.text[:200]}...")
-
-            if offers_response.status_code != 200:
-                error_msg = f"كود الخطأ: {offers_response.status_code}"
-                try:
-                    error_data = offers_response.json()
-                    error_msg = error_data.get('message', error_msg)
-                except:
-                    pass
-                bot.send_message(message.chat.id, f"❌ فشل في جلب العروض: {error_msg}")
-                return
-
-            try:
-                offers_data = offers_response.json()
-                if not isinstance(offers_data, dict) or not offers_data.get('success', False):
-                    bot.send_message(message.chat.id, "❌ استجابة غير صالحة من الخادم")
-                    return
-
-                # البحث عن العرض المحدد
-                offer = None
-                for item in offers_data.get('offers', []):
-                    if str(item.get('id')) == str(offer_id):
-                        offer = item
-                        break
-
-                if not offer:
-                    bot.send_message(message.chat.id, "❌ لم يتم العثور على العرض المحدد")
-                    return
-
-                # التحقق من البيانات الأساسية
-                required_fields = ['id', 'title', 'unit_price', 'stock']
-                if not all(field in offer for field in required_fields):
-                    bot.send_message(message.chat.id, "❌ بيانات العرض ناقصة")
-                    return
-
-                # التحقق من المخزون
-                if int(offer.get('stock', 0)) <= 0:
-                    bot.send_message(message.chat.id, "⚠️ هذا العرض غير متوفر حالياً")
-                    return
-
-                # التحويل الآمن للسعر
-                try:
-                    price_syp = convert_to_syp(float(offer['unit_price']))
-                except (ValueError, TypeError):
-                    bot.send_message(message.chat.id, "❌ سعر العرض غير صالح")
-                    return
-
-                # التحقق من الرصيد
-                current_balance = get_balance(user_id)
-                if current_balance < price_syp:
-                    bot.send_message(message.chat.id, 
-                                   f"⚠️ الرصيد المطلوب: {price_syp} ل.س\nرصيدك الحالي: {current_balance} ل.س")
-                    return
-
-            except Exception as e:
-                print(f"📛 خطأ في معالجة العرض: {str(e)}")
-                bot.send_message(message.chat.id, "❌ خطأ في معالجة بيانات العرض")
-                return
-
-        except requests.exceptions.RequestException as e:
-            print(f"📛 خطأ اتصال: {str(e)}")
-            bot.send_message(message.chat.id, "❌ تعذر الاتصال بخادم العروض")
+        headers = {'X-API-Key': G2BULK_API_KEY}
+        response = requests.get(
+            f"{BASE_URL}topup/pubgMobile/offers",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            bot.send_message(message.chat.id, "❌ فشل في جلب تفاصيل العرض")
             return
-
-        # 2. تنفيذ عملية الشراء
-        try:
-            print(f"🛒 محاولة شراء العرض {offer_id}...")
-            purchase_data = {
-                "quantity": 1,
-                "player_id": player_id
-            }
-
-            purchase_response = requests.post(
-                f"https://api.g2bulk.com/v1/topup/pubgMobile/offers/{offer_id}/purchase",
-                json=purchase_data,
-                headers=headers,
-                timeout=15
-            )
-
-            # تسجيل استجابة الشراء
-            print(f"📦 استجابة الشراء: {purchase_response.status_code} - {purchase_response.text[:200]}...")
-
-            if purchase_response.status_code == 200:
-                try:
-                    result = purchase_response.json()
-                    if not isinstance(result, dict) or not result.get('success', False):
-                        raise ValueError(result.get('message', 'فشلت العملية'))
-
-                    # العمليات الناجحة
-                    update_balance(user_id, -price_syp)
-                    
-                    # رسالة التأكيد
-                    confirmation = (
-                        f"✅ تمت عملية الشراء بنجاح!\n\n"
-                        f"📌 العرض: {offer['title']}\n"
-                        f"👤 رقم اللاعب: {player_id}\n"
-                        f"💳 المبلغ: {price_syp} ل.س\n"
-                        f"🆔 رقم العملية: {result.get('topup_id', 'غير متوفر')}\n\n"
-                        f"📝 ملاحظة: {result.get('message', 'سيتم إرسال التفاصيل قريباً')}"
-                    )
-                    bot.send_message(message.chat.id, confirmation)
-
-                    # إشعار الأدمن
-                    admin_msg = (
-                        f"🛒 عملية شراء جديدة\n\n"
-                        f"👤 المستخدم: {user_id}\n"
-                        f"🎮 العرض: {offer['title']}\n"
-                        f"🆔 اللاعب: {player_id}\n"
-                        f"💰 المبلغ: {price_syp} ل.س\n"
-                        f"📌 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
-                    )
-                    bot.send_message(ADMIN_ID, admin_msg)
-
-                except json.JSONDecodeError:
-                    bot.send_message(message.chat.id, "⚠️ تمت العملية ولكن مع استجابة غير واضحة")
-                except Exception as e:
-                    bot.send_message(message.chat.id, f"⚠️ تمت العملية مع ملاحظة: {str(e)}")
-            else:
-                error_msg = "خطأ غير معروف"
-                try:
-                    error_data = purchase_response.json()
-                    error_msg = error_data.get('message', str(purchase_response.text[:200]))
-                except:
-                    error_msg = purchase_response.text[:200] or f"كود الخطأ: {purchase_response.status_code}"
-                
-                bot.send_message(message.chat.id, f"❌ فشلت العملية: {error_msg}")
-
-        except requests.exceptions.Timeout:
-            bot.send_message(message.chat.id, "⏳ انتهى وقت الانتظار. يرجى التحقق من حالة الطلب لاحقاً.")
-        except requests.exceptions.RequestException as e:
-            bot.send_message(message.chat.id, f"🌐 خطأ في الاتصال: {str(e)}")
-        except Exception as e:
-            bot.send_message(message.chat.id, f"⚠️ خطأ غير متوقع: {str(e)}")
-
+            
+        offers = response.json().get('offers', [])
+        offer = next((o for o in offers if str(o['id']) == offer_id), None)
+        
+        if not offer:
+            bot.send_message(message.chat.id, "❌ العرض غير متوفر")
+            return
+            
+        price_syp = convert_to_syp(offer['unit_price'])
+        
+        # التحقق من الرصيد
+        if get_balance(user_id) < price_syp:
+            bot.send_message(message.chat.id, 
+                           f"⚠️ الرصيد المطلوب: {price_syp} ل.س\nرصيدك الحالي: {get_balance(user_id)} ل.س")
+            return
+            
+        # إنشاء واجهة المعاينة
+        preview_text = (
+            f"🛒 تأكيد عملية الشراء\n\n"
+            f"📌 العرض: {offer['title']}\n"
+            f"💰 السعر: {price_syp} ل.س\n"
+            f"👤 رقم اللاعب: {player_id}\n\n"
+            f"هل أنت متأكد من المعلومات أعلاه؟"
+        )
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f'confirm_topup_{offer_id}_{player_id}'),
+            types.InlineKeyboardButton("❌ إلغاء", callback_data=f'cancel_topup_{offer_id}')
+        )
+        
+        bot.send_message(message.chat.id, preview_text, reply_markup=markup)
+        
     except Exception as e:
-        bot.send_message(message.chat.id, "🔥 حدث خطأ حرج! يرجى إبلاغ الإدارة.")
-        print(f"🔥 خطأ حرج: {str(e)}")
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 def _extract_error_message(self, response):
     """استخراج رسالة الخطأ من الاستجابة"""
     try:
