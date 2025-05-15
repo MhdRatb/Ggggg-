@@ -869,7 +869,7 @@ def confirm_freefire2_purchase(call):
             f"{FREE_FIRE2_BASE_URL}topup",
             json=payload,
             headers=headers,
-            timeout=15
+            timeout=40
         )
         
         if response.status_code == 200:
