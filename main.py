@@ -880,7 +880,7 @@ def confirm_freefire2_purchase(call):
             order_id = result.get('transaction_id', 'N/A')
             
             # تسجيل الطلب في قاعدة البيانات
-            log_user_order(
+            order_id = log_user_order(
                 user_id=user_id,
                 order_type='freefire2',
                 product_id=product_id,
@@ -894,21 +894,22 @@ def confirm_freefire2_purchase(call):
             bot.edit_message_text(
                 f"✅ تمت عملية الشراء بنجاح!\n\n"
                 f"📌 العرض: {product['offerName']}\n"
-                f"👤 ID اللاعب: {player_id}\n"
+                f"🆔 ID اللاعب: {player_id}\n"
                 f"💳 المبلغ: {price_syp:,} ل.س\n"
-                f"🆔 رقم العملية: {order_id}",
+                f"📌 رقم العملية: {order_id}",
                 call.message.chat.id,
                 call.message.message_id
             )
             
             # إشعار الأدمن
             admin_msg = (
-                f"🛒 عملية شراء جديدة\n\n"
+                f"🛒 عملية شراء جديدة\n"
+                f"free fire Gtopup \n\n"
                 f"👤 المستخدم: {user_id}\n"
                 f"📌 العرض: {product['offerName']}\n"
                 f"🆔 اللاعب: {player_id}\n"
                 f"💰 المبلغ: {price_syp} ل.س\n"
-                f"📌 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
+                f"📌 رقم العملية: {order_id}"
             )
             bot.send_message(ADMIN_ID, admin_msg)
             
@@ -1513,9 +1514,19 @@ def confirm_freefire_purchase(call):
                     f"📌 العرض: {pkg['name']}\n"
                     f"👤 ID اللاعب: {player_id}\n"
                     f"💳 المبلغ: {price_syp} ل.س\n"
+                    f"📌 رقم المعاملة : {order_id}"
 
                 )
-                
+                admin_msg = (
+                    f"🛒 عملية شراء جديدة\n"
+                    f" Free Fire imabou\n"
+                    f"👤 المستخدم: {user_id}\n"
+                    f"📌 العرض: {pkg['name']}\n"
+                    f"🆔 اللاعب: {player_id}\n"
+                    f"💰 المبلغ: {price_syp} ل.س\n"
+                    f"📌 رقم المعاملة : {order_id}"
+                )
+                bot.send_message(ADMIN_ID, admin_msg)
                 bot.edit_message_text(
                     success_msg,
                     call.message.chat.id,
@@ -2668,7 +2679,8 @@ def handle_topup_confirmation(call):
             
             # إشعار الأدمن
             admin_msg = (
-                f"🛒 عملية شراء جديدة\n\n"
+                f"🛒 عملية شراء جديدة\n"
+                f"PUBG Mobile \n\n"
                 f"👤 المستخدم: {user_id}\n"
                 f"🎮 العرض: {offer['title']}\n"
                 f"🆔 اللاعب: {player_id}\n"
