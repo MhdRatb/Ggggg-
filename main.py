@@ -142,7 +142,9 @@ safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_codes (
                 last_reset_date TEXT,
                 is_active BOOLEAN DEFAULT TRUE
                 )''')
-
+safe_db_execute('''CREATE TABLE IF NOT EXISTS disabled_buttons
+             (button_name TEXT PRIMARY KEY,
+              is_disabled BOOLEAN DEFAULT FALSE)''')
 if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_disabled'"):
     safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('recharge_disabled', '0')")
 
@@ -158,6 +160,14 @@ safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
 
+safe_db_execute('''CREATE TABLE IF NOT EXISTS admins
+             (admin_id INTEGER PRIMARY KEY,
+              username TEXT,
+              added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+if not safe_db_execute("SELECT * FROM admins WHERE admin_id=?", (ADMIN_ID,)):
+    safe_db_execute("INSERT INTO admins (admin_id) VALUES (?)", (ADMIN_ID,))
+
 if not safe_db_execute("SELECT * FROM exchange_rate"):
     safe_db_execute("INSERT INTO exchange_rate (rate, updated_at) VALUES (?, ?)",
                     (DEFAULT_EXCHANGE_RATE, datetime.now()))
@@ -168,6 +178,8 @@ if not safe_db_execute("SELECT * FROM bot_settings WHERE key='is_paused'"):
 if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_code'"):
     safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('recharge_code', 'GGSTORE123')")
 
+if not safe_db_execute("SELECT * FROM bot_settings WHERE key='channel_id'"):
+    safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('channel_id', '')")
 
 bot = telebot.TeleBot(API_KEY)
 # ============= إضافة الدوال للنسخ الاحتياطي والاستعادة =============
@@ -204,6 +216,10 @@ def initialize_database():
     if not safe_db_execute("SELECT * FROM exchange_rate"):
         safe_db_execute("INSERT INTO exchange_rate (rate, updated_at) VALUES (?, ?)",
                       (DEFAULT_EXCHANGE_RATE, datetime.now()))
+    if not safe_db_execute("SELECT * FROM bot_settings WHERE key='channel_id'"):
+        safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('channel_id', '')")
+    if not safe_db_execute("SELECT * FROM admins WHERE admin_id=?", (ADMIN_ID,)):
+        safe_db_execute("INSERT INTO admins (admin_id) VALUES (?)", (ADMIN_ID,))
 # التحقق من وجود الأعمدة وإضافتها إذا لزم الأمر
 def ensure_columns_exist():
     try:
@@ -323,6 +339,15 @@ def process_restore(message):
                 daily_used INTEGER DEFAULT 0,
                 last_reset_date TEXT,
                 is_active BOOLEAN DEFAULT TRUE
+            )''',
+                '''CREATE TABLE IF NOT EXISTS admins
+                (admin_id INTEGER PRIMARY KEY,
+                username TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
+                '''CREATE TABLE IF NOT EXISTS disabled_buttons
+                (button_name TEXT PRIMARY KEY,
+                is_disabled BOOLEAN DEFAULT FALSE
             )'''
         ]
         
@@ -356,8 +381,18 @@ def process_restore(message):
 
 # ============= وظائف المساعدة =============
 def is_admin(user_id):
-    return user_id == ADMIN_ID
-
+    try:
+        return bool(safe_db_execute("SELECT 1 FROM admins WHERE admin_id=?", (user_id,)))
+    except Exception as e:
+        print(f"Error checking admin status: {str(e)}")
+        return user_id == ADMIN_ID
+def get_notification_channel():
+    try:
+        result = safe_db_execute("SELECT value FROM bot_settings WHERE key='channel_id'")
+        return result[0][0] if result else None
+    except Exception as e:
+        print(f"Error getting channel ID: {str(e)}")
+        return None
 def get_exchange_rate():
     """الحصول على سعر الصرف مع معالجة الأخطاء."""
     try:
@@ -366,6 +401,12 @@ def get_exchange_rate():
     except Exception as e:
         print(f"Error getting exchange rate: {str(e)}")
         return DEFAULT_EXCHANGE_RATE
+def is_button_disabled(button_name):
+    result = safe_db_execute("SELECT is_disabled FROM disabled_buttons WHERE button_name=?", (button_name,))
+    return result[0][0] if result else False
+def get_notification_channel():
+    result = safe_db_execute("SELECT value FROM bot_settings WHERE key='channel_id'")
+    return result[0][0] if result else None
 def log_user_order(user_id, order_type, product_id, product_name, price, player_id=None, api_response=None):
     try:
         api_response_json = json.dumps(api_response) if api_response else None
@@ -685,16 +726,28 @@ def is_bot_paused():
 
 # ============= واجهة المستخدم =============
 def main_menu(user_id):
-    markup = types.ReplyKeyboardMarkup(        
-        resize_keyboard=True,
-        is_persistent=True)
-
-    markup.row('⚡PUBG MOBILE⚡', '🔥FREE FIRE🔥')  
-    markup.row('أكواد وبطاقات', '🛍️ المنتجات اليدوية')
-    markup.row('طلباتي 🗂️', 'رصيدي 💰') 
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    
+    buttons = [
+        ('⚡PUBG MOBILE⚡', 'pubg'),
+        ('🔥FREE FIRE🔥', 'freefire'),
+        ('أكواد وبطاقات', 'cards'),
+        ('🛍️ المنتجات اليدوية', 'manual'),
+        ('طلباتي 🗂️', 'orders'),
+        ('رصيدي 💰', 'balance')
+    ]
+    
+    # تصفية الأزرار المعطلة
+    enabled_buttons = [btn[0] for btn in buttons if not is_button_disabled(btn[1])]
+    
+    # تنظيم الأزرار في صفوف
+    for i in range(0, len(enabled_buttons), 2):
+        row = enabled_buttons[i:i+2]
+        markup.row(*row)
     
     if is_admin(user_id):
         markup.row('لوحة التحكم ⚙️')
+        
     return markup
 # ============= معالجة الأحداث =============
 @bot.message_handler(commands=['start'])
@@ -712,7 +765,8 @@ def back_to_main_menu(message):
         "مرحبا بكم في متجر GG STORE !",
         reply_markup=main_menu(message.from_user.id)
     )
-@bot.message_handler(func=lambda msg: msg.text == '🔥FREE FIRE🔥')
+@bot.message_handler(func=lambda msg: msg.text == '🔥FREE FIRE🔥' and not is_button_disabled('freefire'))
+
 def free_fire_main_menu(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
@@ -742,6 +796,176 @@ def free_fire_main_menu(message):
             f"السيرفر الاول سرعة اكبر السيرفر الثاني اسعار افضل ",
             reply_markup=markup
         )
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_buttons' and is_admin(call.from_user.id))
+def handle_manage_buttons(call):
+    buttons = [
+        ('PUBG Mobile', 'pubg'),
+        ('Free Fire', 'freefire'),
+        ('أكواد وبطاقات', 'cards'),
+        ('المنتجات اليدوية', 'manual'),
+        ('طلباتي', 'orders'),
+        ('رصيدي', 'balance')
+    ]
+    
+    markup = types.InlineKeyboardMarkup()
+    for name, key in buttons:
+        status = "❌" if is_button_disabled(key) else "✅"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {name}",
+            callback_data=f'toggle_button_{key}'
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
+    
+    bot.edit_message_text(
+        "إدارة أزرار القائمة الرئيسية:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_button_') and is_admin(call.from_user.id))
+def handle_toggle_button(call):
+    button_key = call.data.split('_')[2]
+    current_status = is_button_disabled(button_key)
+    
+    safe_db_execute(
+        "INSERT OR REPLACE INTO disabled_buttons (button_name, is_disabled) VALUES (?, ?)",
+        (button_key, not current_status)
+    )
+    
+    bot.answer_callback_query(call.id, f"تم {'تعطيل' if not current_status else 'تفعيل'} الزر")
+    handle_manage_buttons(call)  # تحديث القائمة
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_channel' and is_admin(call.from_user.id))
+def handle_manage_channel(call):
+    channel_id = get_notification_channel()
+    status = "✅ معينة" if channel_id else "❌ غير معينة"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("تعيين القناة", callback_data='set_channel'))
+    if channel_id:
+        markup.add(types.InlineKeyboardButton("إزالة القناة", callback_data='remove_channel'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
+    
+    bot.edit_message_text(
+        f"إدارة القناة:\n\nالحالة الحالية: {status}",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == 'set_channel' and is_admin(call.from_user.id))
+def handle_set_channel(call):
+    msg = bot.send_message(
+        call.message.chat.id,
+        "أرسل معرف القناة (يجب أن يبدأ ب @ أو يكون آيدي رقمي):",
+        reply_markup=types.ForceReply()
+    )
+    bot.register_next_step_handler(msg, process_set_channel)
+
+def process_set_channel(message):
+    try:
+        channel_id = message.text.strip()
+        if not (channel_id.startswith('@') or channel_id.lstrip('-').isdigit()):
+            raise ValueError("معرف القناة غير صالح")
+            
+        safe_db_execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
+                       ('channel_id', channel_id))
+        bot.send_message(message.chat.id, f"✅ تم تعيين القناة بنجاح: {channel_id}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'remove_channel' and is_admin(call.from_user.id))
+def handle_remove_channel(call):
+    safe_db_execute("DELETE FROM bot_settings WHERE key='channel_id'")
+    bot.answer_callback_query(call.id, "✅ تمت إزالة القناة بنجاح")
+    handle_manage_channel(call)
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_admins' and is_admin(call.from_user.id))
+def handle_manage_admins(call):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("➕ إضافة مشرف", callback_data='add_admin'))
+    markup.add(types.InlineKeyboardButton("🗑️ حذف مشرف", callback_data='remove_admin'))
+    markup.add(types.InlineKeyboardButton("📋 قائمة المشرفين", callback_data='list_admins'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
+    
+    bot.edit_message_text(
+        "إدارة المشرفين:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == 'add_admin' and is_admin(call.from_user.id))
+def handle_add_admin(call):
+    msg = bot.send_message(
+        call.message.chat.id,
+        "أرسل آيدي المستخدم الذي تريد ترقيته إلى مشرف:",
+        reply_markup=types.ForceReply()
+    )
+    bot.register_next_step_handler(msg, process_add_admin)
+
+def process_add_admin(message):
+    try:
+        new_admin_id = int(message.text)
+        if is_admin(new_admin_id):
+            bot.send_message(message.chat.id, "⚠️ هذا المستخدم مشرف بالفعل!")
+            return
+            
+        safe_db_execute(
+            "INSERT INTO admins (admin_id, username) VALUES (?, ?)",
+            (new_admin_id, f"@{message.from_user.username}" if message.from_user.username else None)
+        )
+        bot.send_message(message.chat.id, f"✅ تمت ترقية المستخدم {new_admin_id} إلى مشرف")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال آيدي صحيح!")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'remove_admin' and is_admin(call.from_user.id))
+def handle_remove_admin(call):
+    admins = safe_db_execute("SELECT admin_id, username FROM admins WHERE admin_id != ?", (ADMIN_ID,))
+    if not admins:
+        bot.answer_callback_query(call.id, "⚠️ لا يوجد مشرفين آخرين")
+        return
+        
+    markup = types.InlineKeyboardMarkup()
+    for admin_id, username in admins:
+        markup.add(types.InlineKeyboardButton(
+            f"{username or admin_id}",
+            callback_data=f'confirm_remove_admin_{admin_id}'
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_admins'))
+    
+    bot.edit_message_text(
+        "اختر المشرف الذي تريد إزالته:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_remove_admin_') and is_admin(call.from_user.id))
+def handle_confirm_remove_admin(call):
+    admin_id = call.data.split('_')[3]
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ نعم، أحذف", callback_data=f'execute_remove_admin_{admin_id}'),
+        types.InlineKeyboardButton("❌ إلغاء", callback_data='manage_admins')
+    )
+    
+    bot.edit_message_text(
+        f"⚠️ هل أنت متأكد من حذف المشرف {admin_id}؟",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('execute_remove_admin_') and is_admin(call.from_user.id))
+def handle_execute_remove_admin(call):
+    admin_id = call.data.split('_')[3]
+    safe_db_execute("DELETE FROM admins WHERE admin_id=?", (admin_id,))
+    bot.edit_message_text(
+        f"✅ تم حذف المشرف {admin_id} بنجاح",
+        call.message.chat.id,
+        call.message.message_id
+    )
 #========== free fire 2 ==================
 @bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 2')
 def show_freefire2_offers_handler(message):
@@ -904,14 +1128,23 @@ def confirm_freefire2_purchase(call):
             # إشعار الأدمن
             admin_msg = (
                 f"🛒 عملية شراء جديدة\n"
-                f"free fire Gtopup \n\n"
+                f" #Free_Fire_imabou\n\n"
                 f"👤 المستخدم: {user_id}\n"
                 f"📌 العرض: {product['offerName']}\n"
                 f"🆔 اللاعب: {player_id}\n"
                 f"💰 المبلغ: {price_syp} ل.س\n"
                 f"📌 رقم العملية: {order_id}"
             )
-            bot.send_message(ADMIN_ID, admin_msg)
+            channel_id = get_notification_channel()
+            if channel_id:
+                try:
+                    bot.send_message(channel_id, admin_msg)
+                except Exception as e:
+                    print(f"Failed to send to channel: {str(e)}")
+                    # Fallback to admin if channel fails
+                    bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
+            else:
+                bot.send_message(ADMIN_ID, admin_msg)
             
         else:
             error_msg = response.json().get('message', 'فشلت العملية دون تفاصيل')
@@ -946,12 +1179,14 @@ def show_balance_handler(message):
     except Exception as e:
         bot.send_message(message.chat.id, "❌ حدث خطأ!")
 
-@bot.message_handler(func=lambda msg: msg.text == 'أكواد وبطاقات')
+@bot.message_handler(func=lambda msg: msg.text == 'أكواد وبطاقات' and not is_button_disabled('cards'))
+
 def show_categories_handler(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
     show_categories(message)
-@bot.message_handler(func=lambda msg: msg.text == '🛍️ المنتجات اليدوية')
+@bot.message_handler(func=lambda msg: msg.text == '🛍️ المنتجات اليدوية' and not is_button_disabled('manual'))
+
 def show_manual_categories(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
@@ -1101,7 +1336,26 @@ def handle_user_management(call):
     markup.add(
         types.InlineKeyboardButton('بحث بالآيدي', callback_data='search_by_id'),
         types.InlineKeyboardButton('بحث بالاسم', callback_data='search_by_name'),
-        types.InlineKeyboardButton('المستخدمين النشطين', callback_data='active_users'),
+        types.InlineKeyboardButton('إجمالي أرصدة المستخدمين', callback_data='total_balances'),
+        types.InlineKeyboardButton('خصم من المستخدم', callback_data='deduct_balance'),
+        types.InlineKeyboardButton('تعديل رصيد مستخدم', callback_data='edit_balance'),
+        types.InlineKeyboardButton('رجوع', callback_data='admin_panel')
+    )
+    
+    bot.edit_message_text(
+        "إدارة المستخدمين:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_manual')
+def handle_manage_manual(call):
+    markup = types.InlineKeyboardMarkup()
+    
+    markup.add(
+        types.InlineKeyboardButton('المنتجات', callback_data='manage_manual_products'),
+        types.InlineKeyboardButton('الفئات', callback_data='manage_manual_categories'),
+        types.InlineKeyboardButton('الطلبات', callback_data='manage_manual_orders'),
         types.InlineKeyboardButton('رجوع', callback_data='admin_panel')
     )
     
@@ -1179,7 +1433,7 @@ def edit_product_price(call):
 
 def process_edit_product_price(message, call, product_id):
     try:
-        new_price = int(message.text)
+        new_price = float(message.text)
         if new_price <= 0:
             bot.send_message(message.chat.id, "❌ السعر يجب أن يكون أكبر من الصفر")
             return
@@ -1519,14 +1773,23 @@ def confirm_freefire_purchase(call):
                 )
                 admin_msg = (
                     f"🛒 عملية شراء جديدة\n"
-                    f" Free Fire imabou\n"
+                    f" #Free_Fire_Gtopuo\n"
                     f"👤 المستخدم: {user_id}\n"
                     f"📌 العرض: {pkg['name']}\n"
                     f"🆔 اللاعب: {player_id}\n"
                     f"💰 المبلغ: {price_syp} ل.س\n"
                     f"📌 رقم المعاملة : {order_id}"
                 )
-                bot.send_message(ADMIN_ID, admin_msg)
+                channel_id = get_notification_channel()
+                if channel_id:
+                    try:
+                        bot.send_message(channel_id, admin_msg)
+                    except Exception as e:
+                        print(f"Failed to send to channel: {str(e)}")
+                        # Fallback to admin if channel fails
+                        bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
+                else:
+                    bot.send_message(ADMIN_ID, admin_msg)
                 bot.edit_message_text(
                     success_msg,
                     call.message.chat.id,
@@ -1607,7 +1870,7 @@ def handle_api_error(call, error_msg, price_syp=None):
         )
     except Exception as e:
         print(f"Error in error handling: {str(e)}")
-@bot.message_handler(func=lambda msg: msg.text == '⚡PUBG MOBILE⚡')
+@bot.message_handler(func=lambda msg: msg.text == '⚡PUBG MOBILE⚡' and not is_button_disabled('pubg'))
 def show_topup_offers_handler(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
@@ -1666,7 +1929,7 @@ def process_new_manual_category(message):
         bot.send_message(message.chat.id, f"✅ تمت إضافة الفئة '{name}' بنجاح")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
-@bot.callback_query_handler(func=lambda call: call.data == 'manage_manual_products')
+
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_manual_products')
 def manage_manual_products(call):
     try:
@@ -2680,14 +2943,23 @@ def handle_topup_confirmation(call):
             # إشعار الأدمن
             admin_msg = (
                 f"🛒 عملية شراء جديدة\n"
-                f"PUBG Mobile \n\n"
+                f"#PUBG_Mobile \n\n"
                 f"👤 المستخدم: {user_id}\n"
                 f"🎮 العرض: {offer['title']}\n"
                 f"🆔 اللاعب: {player_id}\n"
                 f"💰 المبلغ: {price_syp} ل.س\n"
                 f"📌 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
             )
-            bot.send_message(ADMIN_ID, admin_msg)
+            channel_id = get_notification_channel()
+            if channel_id:
+                try:
+                    bot.send_message(channel_id, admin_msg)
+                except Exception as e:
+                    print(f"Failed to send to channel: {str(e)}")
+                    # Fallback to admin if channel fails
+                    bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
+            else:
+                bot.send_message(ADMIN_ID, admin_msg)
         else:
             error_msg = purchase_response.json().get('message', 'فشلت العملية')
             bot.edit_message_text(
@@ -3037,8 +3309,6 @@ def handle_callback(call):
     elif data == 'edit_balance' and is_admin(user_id):
         msg = bot.send_message(call.message.chat.id, "أرسل آيدي المستخدم والمبلغ (مثال: 123456789 50000):")
         bot.register_next_step_handler(msg, process_balance_update)
-    elif data == 'list_users' and is_admin(user_id):
-        show_all_users(call.message)
     elif data == 'edit_exchange_rate' and is_admin(user_id):
         msg = bot.send_message(call.message.chat.id, "أرسل سعر الصرف الجديد:")
         bot.register_next_step_handler(msg, process_exchange_rate_update)
@@ -3055,27 +3325,13 @@ def handle_callback(call):
     elif data.startswith('toggle_category_'):
         category_id = data.split('_')[2]
         toggle_category_status(call.message, category_id)
-    elif data == 'edit_category_names' and is_admin(user_id):  # معالج الزر الجديد
-        show_editable_categories(call.message)
     elif data.startswith('edit_product_') and is_admin(user_id):
         product_id = data.split('_')[2]
         msg = bot.send_message(call.message.chat.id, "أرسل الاسم الجديد للمنتج:")
         bot.register_next_step_handler(msg, process_product_name_update, product_id)
     elif data == 'edit_products' and is_admin(user_id):
         manage_products(message)
-    elif data == 'edit_recharge_msg' and is_admin(user_id):
-        msg = bot.send_message(call.message.chat.id, "أرسل الرسالة الجديدة لإعادة الشحن:")
         bot.register_next_step_handler(msg, update_recharge_message)
-    elif data == 'edit_category_names' and is_admin(user_id):
-        show_editable_categories(message)
-    elif data.startswith('edit_catname_') and is_admin(user_id):
-        category_id = data.split('_')[1]
-        msg = bot.send_message(
-            message.chat.id,
-            "✏️ أرسل الاسم الجديد للفئة:",
-            reply_markup=types.ForceReply(selective=True)
-        )
-        bot.register_next_step_handler(msg, process_category_name_update, category_id)
     elif data == 'cancel_edit' and is_admin(user_id):
         bot.send_message(
             message.chat.id,
@@ -3152,47 +3408,7 @@ def ask_transaction_id(message, amount):
             f"❌ حدث خطأ: {str(e)}\nيرجى المحاولة مرة أخرى",
             reply_markup=main_menu(message.from_user.id)
         )
-def process_category_name_update(message, category_id):
-    try:
-        new_name = message.text.strip()
-        if not new_name:
-            bot.send_message(message.chat.id, "❌ الاسم لا يمكن أن يكون فارغًا!")
-            show_editable_categories(message)  # إعادة عرض القائمة
-            return
 
-        headers = {'X-API-Key': G2BULK_API_KEY}
-        payload = {'title': new_name}
-        response = requests.patch(
-            f"{BASE_URL}category/{category_id}",
-            json=payload,
-            headers=headers
-        )
-
-        if response.status_code == 200:
-            bot.send_message(message.chat.id, "✅ تم تحديث اسم الفئة بنجاح!")
-        else:
-            bot.send_message(message.chat.id, "❌ فشل في تحديث اسم الفئة!")
-
-        show_editable_categories(message)  # العودة إلى قائمة الفئات بعد التعديل
-
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
-        show_editable_categories(message)  # العودة إلى القائمة حتى في حالة الخطأ
-def show_editable_categories(message):
-    response = requests.get(f"{BASE_URL}category")
-    if response.status_code == 200:
-        categories = response.json().get('categories', [])
-        markup = types.InlineKeyboardMarkup()
-        for cat in categories:
-            markup.add(types.InlineKeyboardButton(
-                f"✏️ {cat['title']}",  # رمز القلم للتعديل
-                callback_data=f'edit_catname_{cat["id"]}'
-            ))
-        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='admin_panel'))  # للعودة إلى لوحة التحكم
-        bot.send_message(message.chat.id, "اختر الفئة لتعديل اسمها:", reply_markup=markup)
-    else:
-        bot.send_message(message.chat.id, "❌ فشل في جلب قائمة الفئات!")
-        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='admin_panel'))  # للعودة إلى لوحة التحكم
 
 def show_products(message, category_id):
     response = requests.get(f"{BASE_URL}category/{category_id}")
@@ -3339,41 +3555,7 @@ def show_product_details(message, product_id):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("شراء 🛒", callback_data=f"buy_{product['id']}"))
         bot.send_message(message.chat.id, text, reply_markup=markup)
-def show_admin_panel(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.row(
-        types.InlineKeyboardButton('تعديل رصيد مستخدم', callback_data='edit_balance'),
-        types.InlineKeyboardButton('عرض المستخدمين', callback_data='list_users')
-    )
-    markup.row(
-        types.InlineKeyboardButton('تعديل سعر الصرف', callback_data='edit_exchange_rate'),
-        types.InlineKeyboardButton('إدارة الفئات', callback_data='manage_categories')
-    )
-    markup.row(
-        types.InlineKeyboardButton('خصم من المستخدم', callback_data='deduct_balance'),
-        types.InlineKeyboardButton('تعديل أسماء الفئات', callback_data='edit_category_names')
-    )
-    markup.row(
-        types.InlineKeyboardButton('إدارة الفئات اليدوية', callback_data='manage_manual_categories'),
-        types.InlineKeyboardButton('إدارة المنتجات اليدوية', callback_data='manage_manual_products')
-    )
-    markup.row(
-        types.InlineKeyboardButton('إدارة الطلبات اليدوية', callback_data='manage_manual_orders'),
-        types.InlineKeyboardButton('إدارة أكواد الشحن', callback_data='manage_recharge_codes')
-    )
-    markup.add(
-        types.InlineKeyboardButton('إدارة المستخدمين', callback_data='user_management'),
-        types.InlineKeyboardButton('إجمالي أرصدة المستخدمين', callback_data='total_balances')
-    )
-    markup.row(
-        types.InlineKeyboardButton('📦 نسخ احتياطي', callback_data='backup_db'),
-        types.InlineKeyboardButton('🔄 استعادة', callback_data='restore_db')
-    )
-    markup.row(
-        types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot')
-    )
-    
-    bot.send_message(message.chat.id, "⚙️ لوحة التحكم الإدارية:", reply_markup=markup)
+
 @bot.callback_query_handler(func=lambda call: call.data == 'backup_db')
 def backup_database(call):
     try:
@@ -3386,33 +3568,7 @@ def backup_database(call):
         bot.answer_callback_query(call.id, f"❌ خطأ: {str(e)}")
 
 
-def show_editable_categories(message):
-    response = requests.get(f"{BASE_URL}category")
-    if response.status_code == 200:
-        categories = response.json().get('categories', [])
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        
-        for cat in categories:
-            markup.add(
-                types.InlineKeyboardButton(
-                    f"✏️ {cat['title']}",
-                    callback_data=f'edit_catname_{cat["id"]}'
-                )
-            )
-        
-        # إضافة أزرار التنقل
-        markup.row(
-            types.InlineKeyboardButton("رجوع 🔙", callback_data='admin_panel'),
-            types.InlineKeyboardButton("إلغاء ❌", callback_data='cancel_edit')
-        )
-        
-        bot.send_message(
-            message.chat.id,
-            "📁 اختر الفئة لتعديل اسمها:",
-            reply_markup=markup
-        )
-    else:
-        bot.send_message(message.chat.id, "❌ فشل في جلب قائمة الفئات!")
+
 def process_recharge_code_update(message):
     try:
         if message.text == '❌ إلغاء ❌':
@@ -3445,21 +3601,6 @@ def process_recharge_code_update(message):
         )
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
-def show_editable_categories(message):
-    response = requests.get(f"{BASE_URL}category")
-    if response.status_code == 200:
-        categories = response.json().get('categories', [])
-        markup = types.InlineKeyboardMarkup()
-        for cat in categories:
-            markup.add(types.InlineKeyboardButton(
-                f"✏️ {cat['title']}",  # رمز القلم للتعديل
-                callback_data=f'edit_catname_{cat["id"]}'
-            ))
-        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='admin_panel'))  # للعودة إلى لوحة التحكم
-        bot.send_message(message.chat.id, "اختر الفئة لتعديل اسمها:", reply_markup=markup)
-    else:
-        bot.send_message(message.chat.id, "❌ فشل في جلب قائمة الفئات!")
-
 
 @bot.message_handler(func=lambda msg: msg.text == 'رصيدي 💰')
 def show_balance_handler(message):
@@ -3732,17 +3873,13 @@ def show_product_details(message, product_id):
         bot.send_message(message.chat.id, text, reply_markup=markup)
 
 def show_topup_offers(message):
-    """عرض العروض مع تحسين معالجة الاستجابة."""
+
     try:
-        print(f"Requesting URL: {BASE_URL}topup/pubgMobile/offers")
         response = requests.get(
             f"{BASE_URL}topup/pubgMobile/offers",
             headers={'X-API-Key': G2BULK_API_KEY},
-            timeout=10
+            timeout=15
         )
-        
-        #print(f"Response Status: {response.status_code}")
-        #print(f"Response Content: {response.text[:200]}...")  # طباعة جزء من الاستجابة
         
         if response.status_code != 200:
             bot.send_message(message.chat.id, "⚠️ الخدمة غير متاحة حالياً. يرجى المحاولة لاحقاً.")
@@ -3810,15 +3947,7 @@ def process_balance_update(message):
         bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح!")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطأ: {str(e)}")
-def show_all_users(message):
-    try:
-        users = safe_db_execute("SELECT * FROM users")
-        response = "📊 قائمة المستخدمين:\n\n"
-        for user in users:
-            response += f"▫️ آيدي: {user[0]}\n▫️ الرصيد: {user[1]} ل.س\n\n"
-        bot.send_message(message.chat.id, response)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
 
 def process_exchange_rate_update(message):
     try:
@@ -3849,26 +3978,7 @@ def manage_categories(message):
                 callback_data=f"toggle_category_{cat['id']}"
             ))
         bot.send_message(message.chat.id, "تفعيل/إلغاء الفئات:", reply_markup=markup)
-def process_category_name_update(message, category_id):
-    new_name = message.text.strip()
-    if not new_name:
-        bot.send_message(message.chat.id, "❌ الاسم لا يمكن أن يكون فارغًا!")
-        return
 
-    headers = {'X-API-Key': G2BULK_API_KEY}
-    payload = {'title': new_name}
-    response = requests.patch(
-        f"{BASE_URL}category/{category_id}",
-        json=payload,
-        headers=headers
-    )
-
-    if response.status_code == 200:
-        bot.send_message(message.chat.id, "✅ تم تحديث اسم الفئة بنجاح!")
-    else:
-        bot.send_message(message.chat.id, "❌ فشل في تحديث اسم الفئة!")
-
-    show_editable_categories(message)  # العودة إلى قائمة الفئات القابلة للتعديل
 def toggle_category_status(message, category_id):
     if safe_db_execute("SELECT 1 FROM active_categories WHERE category_id=?", (category_id,)):
         safe_db_execute("DELETE FROM active_categories WHERE category_id=?", (category_id,))
@@ -3985,7 +4095,33 @@ def handle_purchase(message, product_id, quantity):
             bot.send_message(message.chat.id, "❌ فشلت عملية الشراء!")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ غير متوقع: {str(e)}")
-
+def show_admin_panel(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton('تعديل سعر الصرف', callback_data='edit_exchange_rate'),
+        types.InlineKeyboardButton("إدارة الأزرار", callback_data='manage_buttons')
+    )
+    markup.row(
+        types.InlineKeyboardButton('إدارة المستخدمين', callback_data='user_management'),
+        types.InlineKeyboardButton('إدارة المشرفين', callback_data='manage_admins')
+    )
+    markup.row(
+        types.InlineKeyboardButton('إدارة القناة', callback_data='manage_channel'),
+        types.InlineKeyboardButton('إدارة الفئات', callback_data='manage_categories')
+    )
+    markup.row(
+        types.InlineKeyboardButton('إدارة العمليات اليدوية', callback_data='manage_manual'),
+        types.InlineKeyboardButton('إدارة أكواد الشحن', callback_data='manage_recharge_codes')
+    )
+    markup.row(
+        types.InlineKeyboardButton('📦 نسخ احتياطي', callback_data='backup_db'),
+        types.InlineKeyboardButton('🔄 استعادة', callback_data='restore_db')
+    )
+    markup.row(
+        types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot')
+    )
+    
+    bot.send_message(message.chat.id, "⚙️ لوحة التحكم الإدارية:", reply_markup=markup)
 # ============= تشغيل البوت =============
 if __name__ == '__main__':
     print("Bot is running...")
