@@ -796,6 +796,18 @@ def free_fire_main_menu(message):
             f"السيرفر الاول سرعة اكبر السيرفر الثاني اسعار افضل ",
             reply_markup=markup
         )
+@bot.callback_query_handler(func=lambda call: call.data == 'clean_pending_recharges' and is_admin(call.from_user.id))
+def clean_pending_recharges(call):
+    try:
+        affected = safe_db_execute("""
+            UPDATE recharge_requests 
+            SET status = 'failed' 
+            WHERE status = 'pending' OR status = 'pending_admin'
+        """)[0][0]
+        
+        bot.answer_callback_query(call.id, f"✅ تم تنظيف {affected} طلب معلق")
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ حدث خطأ: {str(e)}")
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_buttons' and is_admin(call.from_user.id))
 def handle_manage_buttons(call):
     buttons = [
@@ -1063,8 +1075,17 @@ def process_freefire2_purchase(message, product):
 def confirm_freefire2_purchase(call):
     try:
         if hasattr(call, 'processed') and call.processed:
+            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
             return
+        
+        # وضع علامة أن الطلب قيد المعالجة
         call.processed = True
+        
+        # تعطيل الزر في الواجهة
+        try:
+            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
+        except:
+            pass
 
         parts = call.data.split('_')
         product_id = parts[2]
@@ -1715,10 +1736,18 @@ def process_freefire_purchase(message, pkg_id):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('ff_confirm_'))
 def confirm_freefire_purchase(call):
     try:
-        # إضافة تحقق لمنع التنفيذ المزدوج
         if hasattr(call, 'processed') and call.processed:
+            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
             return
-        call.processed = True  # وضع علامة أن الطلب تم معالجته
+        
+        # وضع علامة أن الطلب قيد المعالجة
+        call.processed = True
+        
+        # تعطيل الزر في الواجهة
+        try:
+            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
+        except:
+            pass
         
         parts = call.data.split('_')
         pkg_id = int(parts[2])
@@ -2884,8 +2913,17 @@ def process_reject_reason(message, order_id, admin_id, admin_message_id):
 def handle_topup_confirmation(call):
     try:
         if hasattr(call, 'processed') and call.processed:
+            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
             return
+        
+        # وضع علامة أن الطلب قيد المعالجة
         call.processed = True
+        
+        # تعطيل الزر في الواجهة
+        try:
+            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
+        except:
+            pass
         parts = call.data.split('_')
         offer_id = parts[2]
         player_id = parts[3]
@@ -2961,7 +2999,7 @@ def handle_topup_confirmation(call):
             else:
                 bot.send_message(ADMIN_ID, admin_msg)
         else:
-            error_msg = purchase_response.json().get('message', 'فشلت العملية')
+            error_msg = "يرجى ابلاغ الدعم"
             bot.edit_message_text(
                 f"❌ فشلت العملية: {error_msg}",
                 call.message.chat.id,
@@ -3087,6 +3125,7 @@ def handle_manage_recharge_codes(call):
             types.InlineKeyboardButton("📋 عرض الأكواد", callback_data='list_recharge_codes'),
             types.InlineKeyboardButton("🔄 إعادة تعيين", callback_data='reset_recharge_limits'),
             types.InlineKeyboardButton("🔛 تعطيل/تفعيل", callback_data='toggle_recharge_service'),
+            types.InlineKeyboardButton("تنظيف طلبات الشحن", callback_data='clean_pending_recharges'),
             types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')
         )
         # تحرير الرسالة الحالية
@@ -3630,10 +3669,29 @@ def handle_recharge_request(message):
             bot.send_message(message.chat.id, "⏸️ خدمة إعادة تعبئة الرصيد متوقفة حالياً")
             return
             
+        # التحقق من وجود طلبات معلقة أو قيد المراجعة
+        active_requests = safe_db_execute('''
+            SELECT COUNT(*) FROM recharge_requests 
+            WHERE user_id=? AND (status='pending' OR status='pending_admin')
+        ''', (message.from_user.id,))
+        
+        if active_requests and active_requests[0][0] > 0:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ لديك طلب تعبئة قيد المعالجة بالفعل.\n"
+                "يرجى الانتظار حتى يتم معالجة طلبك الحالي قبل إرسال طلب جديد.",
+                reply_markup=main_menu(message.from_user.id)
+            )
+            return
+            
+        # إنشاء لوحة أزرار مع زر الإلغاء
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add('❌ إلغاء العملية')
+        
         msg = bot.send_message(
             message.chat.id,
             "💰 الرجاء إدخال المبلغ الذي تريد إرساله (بين 1000 و540000 ليرة سورية):",
-            reply_markup=types.ForceReply(selective=True)
+            reply_markup=markup
         )
         bot.register_next_step_handler(msg, process_recharge_amount)
     except Exception as e:
@@ -3641,9 +3699,32 @@ def handle_recharge_request(message):
 
 def process_recharge_amount(message):
     try:
+        if message.text == '❌ إلغاء العملية':
+            bot.send_message(
+                message.chat.id,
+                "تم إلغاء عملية الشحن",
+                reply_markup=main_menu(message.from_user.id)
+            )
+            return
+            
         amount = int(message.text)
         if amount < 1000 or amount > 540000:
             raise ValueError("المبلغ يجب أن يكون بين 1000 و540000 ليرة سورية")
+
+        # التحقق مرة أخرى لمنع الثغرات
+        active_requests = safe_db_execute('''
+            SELECT COUNT(*) FROM recharge_requests 
+            WHERE user_id=? AND (status='pending' OR status='pending_admin')
+        ''', (message.from_user.id,))
+        
+        if active_requests and active_requests[0][0] > 0:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ لديك طلب تعبئة قيد المعالجة بالفعل.\n"
+                "يرجى الانتظار حتى يتم معالجة طلبك الحالي قبل إرسال طلب جديد.",
+                reply_markup=main_menu(message.from_user.id)
+            )
+            return
 
         today = datetime.now().strftime("%Y-%m-%d")
         available_code = safe_db_execute('''
@@ -3687,7 +3768,11 @@ def process_recharge_amount(message):
             INSERT INTO recharge_requests (user_id, amount, code_id, status)
             VALUES (?, ?, ?, 'pending')
         ''', (message.from_user.id, amount, code_id))
-        request_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]  # الحصول على معرف الطلب
+        request_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]
+
+        # إنشاء لوحة أزرار مع زر الإلغاء
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add('❌ إلغاء العملية')
 
         instructions = (
             f"📌 لاستكمال عملية الشحن:\n\n"
@@ -3695,9 +3780,6 @@ def process_recharge_amount(message):
             f"<code>{code_num}</code>\n\n"
             f"2. أرسل رقم العملية أو صورة الإشعار بعد الانتهاء"
         )
-
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add('❌ إلغاء العملية')
 
         msg = bot.send_message(
             message.chat.id,
@@ -3708,68 +3790,22 @@ def process_recharge_amount(message):
         bot.register_next_step_handler(msg, process_recharge_proof, request_id, code_id, amount)
 
     except ValueError:
-        bot.send_message(
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add('❌ إلغاء العملية')
+        
+        msg = bot.send_message(
             message.chat.id,
             "❌ يرجى إدخال مبلغ صحيح بين 1000 و540000 ليرة سورية!",
-            reply_markup=main_menu(message.from_user.id)
+            reply_markup=markup
         )
+        bot.register_next_step_handler(msg, process_recharge_amount)
     except Exception as e:
         bot.send_message(
             message.chat.id,
             f"❌ حدث خطأ: {str(e)}",
             reply_markup=main_menu(message.from_user.id)
         )
-def ask_recharge_amount(message):
-    if message.text == '❌ إلغاء ❌':
-        bot.send_message(message.chat.id, "تم إلغاء العملية", reply_markup=main_menu(message.from_user.id))
-        return
-    
-    try:
-        # التحقق من أن الرسالة تحتوي على رقم صحيح موجب
-        amount = int(message.text)
-        
-        # التحقق من أن المبلغ ضمن النطاق المسموح
-        if amount <= 0:
-            raise ValueError("المبلغ يجب أن يكون أكبر من الصفر")
-        if amount > 549000:
-            raise ValueError("المبلغ الأقصى المسموح به هو 549,000 ل.س")
-        
-        # طلب رقم العملية أو الصورة
-        msg = bot.send_message(
-            message.chat.id,
-            f"💰 المبلغ المرسل: {amount:,} ل.س\n\n"
-            "أدخل رقم العملية أو أرسل صورة للإشعار:\n\n"
-            "⚠️ يرجى التأكد من وضوح الصورة قبل إرسالها",
-            parse_mode='Markdown',
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        
-        # ننتقل لخطوة طلب الإثبات مع حفظ المبلغ
-        bot.register_next_step_handler(msg, ask_transaction_id, amount)
-        
-    except ValueError as e:
-        error_msg = str(e)
-        if "المبلغ الأقصى" in error_msg:
-            msg = bot.send_message(
-                message.chat.id,
-                "❌ المبلغ الأقصى المسموح به هو 549,000 ل.س\n"
-                "يرجى إدخال مبلغ أقل أو تقسيم التحويل على دفعات",
-                reply_markup=types.ReplyKeyboardRemove()
-            )
-        else:
-            msg = bot.send_message(
-                message.chat.id,
-                "❌ يرجى إدخال مبلغ صحيح بين 1 و549,000 ل.س!\n"
-                "مثال: 50000",
-                reply_markup=types.ReplyKeyboardRemove()
-            )
-        bot.register_next_step_handler(msg, ask_recharge_amount)
-    except Exception as e:
-        bot.send_message(
-            message.chat.id,
-            f"❌ حدث خطأ: {str(e)}\nيرجى المحاولة مرة أخرى",
-            reply_markup=main_menu(message.from_user.id)
-        )
+
 def notify_admin_recharge_request(user_id, request_id, amount, proof_type, proof_content, code):
     try:
         markup = types.InlineKeyboardMarkup()
@@ -3784,19 +3820,22 @@ def notify_admin_recharge_request(user_id, request_id, amount, proof_type, proof
             f"💰 المبلغ: {amount:,} ل.س\n"
             f"🔢 كود الشحن: {code}\n"
             f"📝 نوع الإثبات: {proof_type}\n"
+            f"🆔 رقم الطلب: {request_id}\n"
         )
 
         if proof_type == "صورة":
+            admin_msg += "🖼️ تم إرسال صورة الإشعار"
             bot.send_photo(
                 ADMIN_ID,
                 proof_content,
-                caption=f"{admin_msg}\n🖼️ تم إرسال صورة الإشعار",
+                caption=admin_msg,
                 reply_markup=markup
             )
         else:
+            admin_msg += f"🔢 رقم العملية: {proof_content}"
             bot.send_message(
                 ADMIN_ID,
-                f"{admin_msg}\n🔢 رقم العملية: {proof_content}",
+                admin_msg,
                 reply_markup=markup
             )
 
@@ -3807,7 +3846,28 @@ def process_recharge_proof(message, request_id, code_id, amount):
     try:
         if message.text == '❌ إلغاء العملية':
             safe_db_execute('UPDATE recharge_requests SET status="cancelled" WHERE id=?', (request_id,))
-            bot.send_message(message.chat.id, "تم إلغاء عملية الشحن", reply_markup=main_menu(message.from_user.id))
+            bot.send_message(
+                message.chat.id,
+                "تم إلغاء عملية الشحن",
+                reply_markup=main_menu(message.from_user.id)
+            )
+            return
+
+        # التحقق مرة أخرى لمنع الثغرات
+        active_requests = safe_db_execute('''
+            SELECT COUNT(*) FROM recharge_requests 
+            WHERE user_id=? AND (status='pending' OR status='pending_admin')
+            AND id != ?
+        ''', (message.from_user.id, request_id))
+        
+        if active_requests and active_requests[0][0] > 0:
+            safe_db_execute('UPDATE recharge_requests SET status="cancelled" WHERE id=?', (request_id,))
+            bot.send_message(
+                message.chat.id,
+                "⚠️ لديك طلب تعبئة قيد المعالجة بالفعل.\n"
+                "تم إلغاء الطلب الحالي.",
+                reply_markup=main_menu(message.from_user.id)
+            )
             return
 
         # تحديد نوع الإثبات
@@ -3817,17 +3877,29 @@ def process_recharge_proof(message, request_id, code_id, amount):
             transaction_id = None
         else:
             proof_type = "رقم العملية"
-            proof_content = message.text.strip()
-            transaction_id = proof_content
+            transaction_id = message.text.strip()
+            
+            if not (transaction_id.isdigit() and len(transaction_id) == 12):
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+                markup.add('❌ إلغاء العملية')
+                
+                msg = bot.send_message(
+                    message.chat.id,
+                    "❌ رقم العملية غير صالح! يجب أن يتكون من 12 رقمًا.\n"
+                    "يرجى إدخال رقم العملية الصحيح:",
+                    reply_markup=markup
+                )
+                bot.register_next_step_handler(msg, process_recharge_proof, request_id, code_id, amount)
+                return
+                
+            proof_content = transaction_id
 
-        # تحديث الطلب في قاعدة البيانات
         safe_db_execute('''
             UPDATE recharge_requests 
             SET transaction_id=?, proof_type=?, proof_content=?, status="pending_admin" 
             WHERE id=?
         ''', (transaction_id, proof_type, proof_content, request_id))
 
-        # إرسال إشعار للإدارة مع تضمين كود الشحن
         code_info = safe_db_execute('SELECT code FROM recharge_codes WHERE id=?', (code_id,))
         if code_info:
             code = code_info[0][0]
@@ -3835,7 +3907,6 @@ def process_recharge_proof(message, request_id, code_id, amount):
         else:
             raise Exception("كود الشحن غير موجود")
 
-        # إرسال تأكيد للمستخدم
         bot.send_message(
             message.chat.id,
             "✅ تم استلام طلبك بنجاح وسيتم مراجعته من قبل الإدارة",
@@ -3843,13 +3914,12 @@ def process_recharge_proof(message, request_id, code_id, amount):
         )
 
     except Exception as e:
-        print(f"Error in process_recharge_proof: {str(e)}")
+        safe_db_execute('UPDATE recharge_requests SET status="failed" WHERE id=?', (request_id,))
         bot.send_message(
             message.chat.id,
             "❌ حدث خطأ أثناء معالجة طلبك. يرجى المحاولة لاحقًا.",
             reply_markup=main_menu(message.from_user.id)
         )
-
 
 def update_recharge_message(message):
     try:
