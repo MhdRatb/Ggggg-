@@ -3885,7 +3885,7 @@ def process_recharge_proof(message, request_id, code_id, amount):
                 
                 msg = bot.send_message(
                     message.chat.id,
-                    "❌ رقم العملية غير صالح! يجب أن يتكون من 12 رقمًا.\n"
+                    "❌ رقم العملية غير صحيح \n"
                     "يرجى إدخال رقم العملية الصحيح:",
                     reply_markup=markup
                 )
