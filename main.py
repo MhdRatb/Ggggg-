@@ -5,6 +5,7 @@ import time
 import json
 import os
 import shutil
+import uuid
 from telebot import types
 from datetime import datetime
 from threading import Lock
@@ -13,22 +14,21 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 ADMIN_ID = 5134156042
-FREE_FIRE_API_KEY = os.getenv("FREE_FIRE_API_KEY") 
-FREE_FIRE_BASE_URL = os.getenv("FREE_FIRE_BASE_URL")
+FREE_FIRE_NEW_API_BASE = os.getenv("FREE_FIRE_NEW_API_BASE")
+FREE_FIRE_NEW_API_KEY = os.getenv("FREE_FIRE_NEW_API_KEY")
 G2BULK_API_KEY = os.getenv("G2BULK_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 FREE_FIRE2_API_KEY = os.getenv("FREE_FIRE2_API_KEY")
 FREE_FIRE2_BASE_URL = os.getenv("FREE_FIRE2_BASE_URL")
 DEFAULT_EXCHANGE_RATE = 15000
-FREE_FIRE_PACKAGES = {
-    1: {"id": 1, "name": "110 Diamonds", "price_usd": 0.85, "gtopup_id": "FREE_FIRE_DIAMONDS_110"},
-    2: {"id": 2, "name": "310 Diamonds", "price_usd": 2.55, "gtopup_id": "FREE_FIRE_DIAMONDS_310"},
-    3: {"id": 3, "name": "520 Diamonds", "price_usd": 4.25, "gtopup_id": "FREE_FIRE_DIAMONDS_520"},
-    4: {"id": 4, "name": "1060 Diamonds", "price_usd": 8.50, "gtopup_id": "FREE_FIRE_DIAMONDS_1060"},
-    5: {"id": 5, "name": "2180 Diamonds", "price_usd": 17.00, "gtopup_id": "FREE_FIRE_DIAMONDS_2180"},
-    6: {"id": 6, "name": "Weekly Membership", "price_usd": 1.70, "gtopup_id": "FREE_FIRE_WEEKLY"},
-    7: {"id": 7, "name": "Monthly Membership", "price_usd": 5.95, "gtopup_id": "FREE_FIRE_MONTHLY"},
-    8: {"id": 8, "name": "Booyah Pass", "price_usd": 2.55, "gtopup_id": "FREE_FIRE_BOOYAH"}
+FREE_FIRE_NEW_PRODUCTS = {
+    1: {"item_id": "1", "name": "110 Diamonds", "price_usd": 0.78},
+    2: {"item_id": "2", "name": "341 Diamonds", "price_usd": 2.34},
+    3: {"item_id": "3", "name": "572 Diamonds", "price_usd": 3.9},
+    4: {"item_id": "4", "name": "1166 Diamonds", "price_usd": 7.8},
+    5: {"item_id": "5", "name": "2398 Diamonds", "price_usd": 15.6},
+    6: {"item_id": "6", "name": "Weekly Membership", "price_usd": 1.6},
+    7: {"item_id": "7", "name": "Monthly Membership", "price_usd": 5.5},
 }
 FREE_FIRE2_PRODUCTS = []
 
@@ -448,7 +448,8 @@ def convert_to_syp(usd_amount):
 def get_balance(user_id):
     results = safe_db_execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
     return results[0][0] if results else 0
-
+def generate_order_id():
+    return f"FF-{uuid.uuid4().hex[:12].upper()}"
 def update_balance(user_id, amount):
     try:
         # التحقق من وجود المستخدم أولاً
@@ -648,7 +649,6 @@ def send_order_confirmation(user_id, order_id, product_name, price, player_id=No
             f"📦 المنتج: {product_name}\n"
             f"💵 المبلغ: {price} ل.س\n"
             f"{f'👤 معرف اللاعب: {player_id}' if player_id else ''}\n\n"
-            f"شكراً لثقتك بنا ❤️"
         )
         bot.send_message(user_id, message)
     except Exception as e:
@@ -783,7 +783,9 @@ def free_fire_main_menu(message):
         bot.send_message(
             message.chat.id,
             f"إختر احد السيرفرات :\n"
-            f"السيرفر الاول سرعة اكبر السيرفر الثاني اسعار افضل ",
+            f"تعمل هذه السيرفرات الساعة 7 مساءً\n"
+            f"السيرفر الاول لا يمكن استخدامه إلا الساعة 7 \n"
+            f"أما الثاني يمكنك استخدامه متى شئت ولكن لن يتم تسليم الطلب قبل الساعة 7",
             reply_markup=markup
             
         )
@@ -792,8 +794,7 @@ def free_fire_main_menu(message):
         # محاولة إرسال الرسالة بدون أي إعدادات تنسيق
         bot.send_message(
             message.chat.id,
-            f"إختر احد السيرفرات :\n"
-            f"السيرفر الاول سرعة اكبر السيرفر الثاني اسعار افضل ",
+            f"إختر احد السيرفرات :\n",
             reply_markup=markup
         )
 @bot.callback_query_handler(func=lambda call: call.data == 'clean_pending_recharges' and is_admin(call.from_user.id))
@@ -1609,243 +1610,150 @@ def show_manual_product_details(call):
         reply_markup=markup
     )
 @bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 1')
-def show_freefire_offers_handler(message):
-
+def show_new_freefire_products(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
-    
-    sorted_packages = sorted(FREE_FIRE_PACKAGES.items(), key=lambda x: x[0])
-    exchange_rate = get_exchange_rate()
-    
+
     markup = types.InlineKeyboardMarkup(row_width=1)
-    
-    for pkg_id, pkg in sorted_packages:
-        price_syp = int(pkg['price_usd'] * exchange_rate)
-        btn_text = f"{pkg['name']} - {price_syp:,} ل.س"
-        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f'ff_offer_{pkg_id}'))
-    
+    exchange_rate = get_exchange_rate()
+
+    for pid, prod in FREE_FIRE_NEW_PRODUCTS.items():
+        price_syp = convert_to_syp(prod['price_usd'])
+        btn_text = f"{prod['name']} - {price_syp:,} ل.س"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f'ff_new_offer_{pid}'))
+
     bot.send_message(message.chat.id, "🎮 عروض Free Fire المتاحة:", reply_markup=markup)
-
-def show_freefire_offers(message):
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ff_new_offer_'))
+def handle_new_freefire_offer(call):
     try:
-        headers = {'X-API-Key': FREE_FIRE_API_KEY}
-        response = requests.get(
-            f"{FREE_FIRE_BASE_URL}topup/freefire/offers",
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            error_msg = f"كود الخطأ: {response.status_code}"
-            try:
-                error_data = response.json()
-                error_msg = error_data.get('detail', error_msg)
-            except:
-                pass
-            bot.send_message(message.chat.id, f"❌ فشل في جلب العروض: {error_msg}")
-            return
+        prod_id = int(call.data.split('_')[-1])
+        product = FREE_FIRE_NEW_PRODUCTS.get(prod_id)
 
-        data = response.json()
-        offers = data.get('offers', [])
-        
-        if not offers:
-            bot.send_message(message.chat.id, "⚠️ لا توجد عروض متاحة حالياً لـ Free Fire.")
-            return
-
-        # ترتيب العروض حسب الـ ID
-        sorted_offers = sorted(offers, key=lambda x: x['id'])
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        for offer in sorted_offers:
-            try:
-                price_syp = convert_to_syp(offer['unit_price'])
-                btn_text = f"{offer['title']} - {price_syp} ل.س"
-                markup.add(types.InlineKeyboardButton(
-                    btn_text, 
-                    callback_data=f"ff_offer_{offer['id']}"
-                ))
-            except KeyError as e:
-                print(f"حقل مفقود في العرض: {str(e)}")
-                continue
-
-        bot.send_message(message.chat.id, "🎮 عروض Free Fire المتاحة:", reply_markup=markup)
-
-    except requests.exceptions.RequestException as e:
-        bot.send_message(message.chat.id, "❌ تعذر الاتصال بالخادم. يرجى المحاولة لاحقاً.")
-    except Exception as e:
-        print(f"Error in Free Fire offers: {str(e)}")
-        bot.send_message(message.chat.id, "❌ حدث خطأ في جلب العروض!")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('ff_offer_'))
-def handle_freefire_offer_selection(call):
-    try:
-        pkg_id = int(call.data.split('_')[2])
-        pkg = FREE_FIRE_PACKAGES.get(pkg_id)
-        
-        if not pkg:
+        if not product:
             bot.answer_callback_query(call.id, "⚠️ العرض غير متوفر")
             return
-        
-        bot.send_message(
+
+        msg = bot.send_message(
             call.message.chat.id,
             "🎮 الرجاء إدخال ID اللاعب في Free Fire:",
             reply_markup=types.ForceReply(selective=True)
         )
-        bot.register_next_step_handler(call.message, process_freefire_purchase, pkg_id)
-        
+        bot.register_next_step_handler(msg, process_new_freefire_purchase, product)
+
     except Exception as e:
-        print(f"Error in offer selection: {str(e)}")
+        print(f"خطأ: {str(e)}")
         bot.send_message(call.message.chat.id, "❌ حدث خطأ في اختيار العرض!")
 
-def process_freefire_purchase(message, pkg_id):
+def process_new_freefire_purchase(message, product):
     try:
         player_id = message.text.strip()
-        pkg = FREE_FIRE_PACKAGES.get(pkg_id)
-        
-        if not pkg:
-            bot.send_message(message.chat.id, "❌ العرض المحدد لم يعد متوفراً")
-            return
-        
+        user_id = message.from_user.id
+
         if not player_id.isdigit() or len(player_id) < 6:
-            bot.send_message(message.chat.id, "❌ رقم اللاعب غير صالح! يجب أن يكون رقماً ويحتوي على 6 خانات على الأقل")
+            bot.send_message(message.chat.id, "❌ رقم اللاعب غير صالح! يجب أن يحتوي على 6 خانات على الأقل")
             return
-        
-        exchange_rate = get_exchange_rate()
-        price_syp = int(pkg['price_usd'] * exchange_rate)
-        
+
+        price_syp = convert_to_syp(product['price_usd'])
+
+        if get_balance(user_id) < price_syp:
+            bot.send_message(message.chat.id, f"⚠️ رصيدك غير كافي. السعر: {price_syp:,} ل.س")
+            return
+
         markup = types.InlineKeyboardMarkup()
         markup.row(
-            types.InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f'ff_confirm_{pkg_id}_{player_id}_{price_syp}'),
+            types.InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f"ff_new_confirm_{product['item_id']}_{player_id}_{price_syp}_{product['name']}"),
             types.InlineKeyboardButton("❌ إلغاء", callback_data='cancel_purchase')
         )
-        
+
         bot.send_message(
             message.chat.id,
             f"🛒 تأكيد عملية الشراء:\n\n"
-            f"📌 العرض: {pkg['name']}\n"
-            f"💰 السعر: {price_syp} ل.س\n"
+            f"📌 العرض: {product['name']}\n"
+            f"💰 السعر: {price_syp:,} ل.س\n"
             f"👤 ID اللاعب: {player_id}\n\n"
             f"هل أنت متأكد من المعلومات أعلاه؟",
             reply_markup=markup
         )
-        
-    except Exception as e:
-        print(f"Error in purchase process: {str(e)}")
-        bot.send_message(message.chat.id, "❌ حدث خطأ غير متوقع في المعالجة!")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('ff_confirm_'))
-def confirm_freefire_purchase(call):
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        bot.send_message(message.chat.id, "❌ حدث خطأ غير متوقع!")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ff_new_confirm_'))
+def confirm_new_freefire_purchase(call):
     try:
-        if hasattr(call, 'processed') and call.processed:
-            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
-            return
-        
-        # وضع علامة أن الطلب قيد المعالجة
-        call.processed = True
-        
-        # تعطيل الزر في الواجهة
-        try:
-            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
-        except:
-            pass
-        
         parts = call.data.split('_')
-        pkg_id = int(parts[2])
-        player_id = parts[3]
-        price_syp = int(parts[4])
+        item_id, player_id, price_syp, item_name = parts[3], parts[4], int(parts[5]), parts[6]
         user_id = call.from_user.id
-        pkg = FREE_FIRE_PACKAGES.get(pkg_id)
-        
-        if not pkg:
-            bot.answer_callback_query(call.id, "❌ العرض غير صالح")
-            return
-            
-        if get_balance(user_id) < price_syp:
-            bot.answer_callback_query(call.id, "❌ رصيدك غير كافي!")
-            return
 
-        # إرسال الطلب إلى Gtopup API
+        order_id = generate_order_id()
+        payload = {
+            "player_id": player_id,
+            "item_id": item_id,
+            "order_id": order_id
+        }
+
         headers = {
-            'Content-Type':'application/json',
-            'X-API-Key': FREE_FIRE_API_KEY
+            "Content-Type": "application/json",
+            "authorization": FREE_FIRE_NEW_API_KEY
         }
-        data = {
-            "playerId": player_id,
-            "packageName": pkg['id'],  
-        }
-        
-        try:
-            response = requests.post(FREE_FIRE_BASE_URL, json=data, headers=headers)
-            result = response.json()
-            
-            # التحقق من نجاح العملية
-            if response.status_code == 200 and result.get('success'):
-                update_balance(user_id, -price_syp)
-                
-                order_id = log_user_order(
-                    user_id=user_id,
-                    order_type='freefire',
-                    product_id=pkg_id,
-                    product_name=pkg['name'],
-                    price=price_syp,
-                    player_id=player_id,
-                    api_response=result
-                )
-                
-                success_msg = (
-                    f"✅ تمت عملية الشراء بنجاح!\n\n"
-                    f"📌 العرض: {pkg['name']}\n"
-                    f"👤 ID اللاعب: {player_id}\n"
-                    f"💳 المبلغ: {price_syp} ل.س\n"
-                    f"📌 رقم المعاملة : {order_id}"
 
-                )
-                admin_msg = (
-                    f"🛒 عملية شراء جديدة\n"
-                    f" #Free_Fire_Gtopuo\n"
-                    f"👤 المستخدم: {user_id}\n"
-                    f"📌 العرض: {pkg['name']}\n"
-                    f"🆔 اللاعب: {player_id}\n"
-                    f"💰 المبلغ: {price_syp} ل.س\n"
-                    f"📌 رقم المعاملة : {order_id}"
-                )
-                channel_id = get_notification_channel()
-                if channel_id:
-                    try:
-                        bot.send_message(channel_id, admin_msg)
-                    except Exception as e:
-                        print(f"Failed to send to channel: {str(e)}")
-                        # Fallback to admin if channel fails
-                        bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
-                else:
-                    bot.send_message(ADMIN_ID, admin_msg)
-                bot.edit_message_text(
-                    success_msg,
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-                
+        response = requests.post(
+            f"{FREE_FIRE_NEW_API_BASE}/api/freefireTopup",
+            json=payload,
+            headers=headers,
+            timeout=20
+        )
 
-                
-            else:
-                error_msg = result.get('message', 'فشلت العملية دون تفاصيل')
-                handle_api_error(call, error_msg, price_syp)
-                
-        except requests.exceptions.RequestException as e:
-            error_msg = f"فشل الاتصال بالخادم: {str(e)}"
-            handle_api_error(call, error_msg, price_syp)
-            
+        if response.status_code == 200:
+            update_balance(user_id, -price_syp)
+
+            order_id_db = log_user_order(
+                user_id=user_id,
+                order_type='freefire',
+                product_id=item_id,
+                product_name=f"FreeFire {item_id}",
+                price=price_syp,
+                player_id=player_id,
+                api_response=response.json()
+            )
+
+            bot.edit_message_text(
+                f"✅ تمت عملية الشراء بنجاح!\n\n"
+                f"📌 العرض: {item_name}\n"
+                f"🆔 ID اللاعب: {player_id}\n"
+                f"💳 المبلغ: {price_syp:,} ل.س\n"
+                f"📌 رقم العملية: {order_id_db}",
+                call.message.chat.id,
+                call.message.message_id
+            )
+
+            admin_msg = (
+                f"🛒 عملية شراء جديدة\n"
+                f" #Free_Fire_AllTopup\n\n"
+                f"👤 المستخدم: {user_id}\n"
+                f"📌 العرض: {item_name}\n"
+                f"🆔 اللاعب: {player_id}\n"
+                f"💰 المبلغ: {price_syp} ل.س\n"
+                f"📌 رقم العملية: {order_id_db}"
+            )
+            channel_id = get_notification_channel()
+            if channel_id:
+                try:
+                    bot.send_message(channel_id, admin_msg)
+                except Exception as e:
+                    print(f"Failed to send to channel: {str(e)}")
+                    # Fallback to admin if channel fails
+                    bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
+        else:
+            err = response.json().get('حاول مرة اخرى لاحقاً')
+            bot.edit_message_text(f"❌ فشلت العملية: {err}", call.message.chat.id, call.message.message_id)
+
     except Exception as e:
-        print(f"Purchase Error: {str(e)}")
-        bot.edit_message_text(
-            "❌ حدث خطأ غير متوقع! يرجى التواصل مع الدعم",
-            call.message.chat.id,
-            call.message.message_id
-        )
-        bot.send_message(
-            ADMIN_ID,
-            f"⚠️ خطأ في عملية شراء Free Fire\nUser: {call.from_user.id}\nError: {str(e)}"
-        )
+        print(f"Confirm Error: {str(e)}")
+        bot.edit_message_text("❌ حدث خطأ أثناء تنفيذ العملية!", call.message.chat.id, call.message.message_id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_status_'))
 def check_order_status(call):
     order_id = call.data.split('_')[2]
@@ -2475,52 +2383,6 @@ def complete_manual_purchase_with_deduction(message, product_id, price, user_id=
         update_balance(user_id, price_syp)
         bot.send_message(user_id, f"❌ فشلت عملية الشراء: {str(e)}")
 
-def complete_manual_purchase(message, product_id, price, user_id=None, player_id=None):
-    if user_id is None:
-        user_id = message.from_user.id
-        player_id = message.text.strip()
-    
-    try:
-        # الحصول على اسم المنتج
-        product_name = safe_db_execute('SELECT name FROM manual_products WHERE id=?', (product_id,))[0][0]
-        
-        # تسجيل الطلب في قاعدة البيانات
-        safe_db_execute(
-            "INSERT INTO manual_orders (user_id, product_id, product_name, price, player_id) VALUES (?, ?, ?, ?, ?)",
-            (user_id, product_id, product_name, price, player_id if player_id else None)
-        )
-        
-        # إرسال تفاصيل الطلب للمستخدم
-        order_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]
-        bot.send_message(
-            user_id,
-            f"✅ تمت عملية الشراء بنجاح!\n\n"
-            f"🆔 رقم الطلب: {order_id}\n"
-            f"📦 المنتج: {product_name}\n"
-            f"💵 المبلغ: {price} ل.س\n"
-            f"{f'👤 معرف اللاعب: {player_id}' if player_id else ''}\n\n"
-            f"سيتم إرسال التفاصيل قريباً"
-        )
-        
-        # إرسال إشعار للأدمن مع زر للموافقة
-        admin_markup = types.InlineKeyboardMarkup()
-        admin_markup.row(
-            types.InlineKeyboardButton("✅ إتمام الطلب", callback_data=f'complete_order_{order_id}'),
-            types.InlineKeyboardButton("❌ رفض الطلب", callback_data=f'reject_order_{order_id}')
-        )
-        
-        admin_msg = (
-            f"🛒 طلب شراء جديد\n\n"
-            f"🆔 رقم الطلب: {order_id}\n"
-            f"👤 المستخدم: {user_id}\n"
-            f"📦 المنتج: {product_name}\n"
-            f"💵 المبلغ: {price} ل.س\n"
-            f"{f'🎮 معرف اللاعب: {player_id}' if player_id else ''}"
-        )
-        bot.send_message(ADMIN_ID, admin_msg, reply_markup=admin_markup)
-        
-    except Exception as e:
-        bot.send_message(user_id if user_id else message.from_user.id, f"❌ حدث خطأ: {str(e)}")
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delete_manual_cat_'))
 def delete_manual_category(call):
     category_id = call.data.split('_')[3]
@@ -2556,16 +2418,7 @@ def delete_manual_product(call):
     bot.send_message(call.message.chat.id, "✅ تم حذف المنتج بنجاح")
     manage_manual_products(call)
 
-@bot.callback_query_handler(func=lambda call: call.data == 'cancel_recharge_code_edit')
-def handle_cancel_recharge_code_edit(call):
-    try:
-        bot.send_message(
-            call.message.chat.id,
-            "تم إلغاء تعديل كود الشحن",
-            reply_markup=main_menu(call.from_user.id)
-        )
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_manual_orders')
 def manage_manual_orders(call):
     markup = types.InlineKeyboardMarkup()
@@ -2738,7 +2591,7 @@ def process_custom_message(message, order_id, admin_id, admin_msg_id):
             f"📦 المنتج: {product_name}\n"
             f"💵 المبلغ: {price} ل.س\n"
             f"{f'🎮 معرف اللاعب: {player_id}' if player_id else ''}\n\n"
-            f"{custom_message if custom_message else 'شكراً لثقتك بنا ❤️'}"
+            f"{custom_message if custom_message else 'يتم العمل على تنفيذ طلبك ستصلك رسالة قريباً'}"
         )
         
         try:
@@ -2797,7 +2650,7 @@ def process_completion_message(message, order_id, admin_id, admin_msg_id):
                 f"📦 المنتج: {product_name}\n"
                 f"💵 المبلغ: {price} ل.س\n"
                 + (f"🎮 معرف اللاعب: {player_id}\n\n" if player_id else "\n")
-                + (f"📬 رسالة من الإدارة:\n{custom_message}" if custom_message else "شكراً لثقتك بنا ❤️")
+                + (f"📬 رسالة من الإدارة:\n{custom_message}" if custom_message else "تمت العملية بنجاح ✅")
             )
             
             bot.send_message(user_id, notification)
@@ -2912,6 +2765,7 @@ def process_reject_reason(message, order_id, admin_id, admin_message_id):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_topup_'))
 def handle_topup_confirmation(call):
     try:
+        # التحقق إذا كانت العملية قيد المعالجة
         if hasattr(call, 'processed') and call.processed:
             bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
             return
@@ -2954,7 +2808,13 @@ def handle_topup_confirmation(call):
         if get_balance(user_id) < price_syp:
             bot.answer_callback_query(call.id, "❌ رصيدك غير كافي!")
             return
-            
+        if get_balance(user_id) < price_syp:
+            bot.edit_message_text(
+                "❌ رصيدك غير كافي!",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            return        
         # تنفيذ عملية الشراء
         purchase_response = requests.post(
             f"{BASE_URL}topup/pubgMobile/offers/{offer_id}/purchase",
@@ -3041,8 +2901,8 @@ def send_order_details_to_user(call):
             f"🆔 رقم الطلب: {order_id}\n"
             f"📦 المنتج: {product_name}\n"
             f"💵 المبلغ: {price} ل.س\n"
-            f"{f'🎮 معرف اللاعب: {player_id}' if player_id else ''}\n\n"
-            f"شكراً لثقتك بنا ❤️"
+            f"{f'🎮 معرف اللاعب: {player_id}' if player_id else ''}\n"
+            
         )
     elif status == 'rejected':
         message_text = (
@@ -3885,7 +3745,7 @@ def process_recharge_proof(message, request_id, code_id, amount):
                 
                 msg = bot.send_message(
                     message.chat.id,
-                    "❌ رقم العملية غير صحيح \n"
+                    "❌ رقم العملية غير صالح! يجب أن يتكون من 12 رقمًا.\n"
                     "يرجى إدخال رقم العملية الصحيح:",
                     reply_markup=markup
                 )
@@ -4115,17 +3975,7 @@ def process_topup_purchase(message, offer_id):
         
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
-def _extract_error_message(self, response):
-    """استخراج رسالة الخطأ من الاستجابة"""
-    try:
-        error_data = response.json()
-        if isinstance(error_data, dict):
-            return error_data.get('message', 
-                               error_data.get('error',
-                                           response.text[:200] or f"كود الخطأ: {response.status_code}"))
-        return response.text[:200] or f"كود الخطأ: {response.status_code}"
-    except:
-        return response.text[:200] or f"كود الخطأ: {response.status_code}"
+
     
 def handle_purchase(message, product_id, quantity):
     user_id = message.from_user.id
