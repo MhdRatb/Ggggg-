@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import uuid
+import threading
 from telebot import types
 from datetime import datetime
 from threading import Lock
@@ -31,7 +32,41 @@ FREE_FIRE_NEW_PRODUCTS = {
     7: {"item_id": "7", "name": "Monthly Membership", "price_usd": 5.5},
 }
 FREE_FIRE2_PRODUCTS = []
+PUBG_OFFERS = []
+LAST_PUBG_UPDATE = None
+PUBG_UPDATE_INTERVAL = 900  # 15 دقيقة بالثواني
 
+# أضف هذه الدالة لتحديث العروض
+def update_pubg_offers():
+    global PUBG_OFFERS, LAST_PUBG_UPDATE
+    
+    try:
+        response = requests.get(
+            f"{BASE_URL}topup/pubgMobile/offers",
+            headers={'X-API-Key': G2BULK_API_KEY},
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            PUBG_OFFERS = response.json().get('offers', [])
+            LAST_PUBG_UPDATE = time.time()
+            print("تم تحديث عروض PUBG Mobile بنجاح")
+        else:
+            print(f"فشل في تحديث عروض PUBG Mobile. كود الخطأ: {response.status_code}")
+    except Exception as e:
+        print(f"خطأ في تحديث عروض PUBG Mobile: {str(e)}")
+
+# استدعاء الدالة عند التشغيل
+update_pubg_offers()
+def periodic_pubg_update():
+    while True:
+        time.sleep(PUBG_UPDATE_INTERVAL)
+        update_pubg_offers()
+
+# بدء التحديث التلقائي في خيط منفصل
+update_thread = threading.Thread(target=periodic_pubg_update)
+update_thread.daemon = True
+update_thread.start()
 # ============= إعداد قاعدة البيانات =============
 conn = sqlite3.connect('wallet.db', check_same_thread=False)
 db_lock = Lock()
@@ -404,9 +439,6 @@ def get_exchange_rate():
 def is_button_disabled(button_name):
     result = safe_db_execute("SELECT is_disabled FROM disabled_buttons WHERE button_name=?", (button_name,))
     return result[0][0] if result else False
-def get_notification_channel():
-    result = safe_db_execute("SELECT value FROM bot_settings WHERE key='channel_id'")
-    return result[0][0] if result else None
 def log_user_order(user_id, order_type, product_id, product_name, price, player_id=None, api_response=None):
     try:
         api_response_json = json.dumps(api_response) if api_response else None
@@ -1811,7 +1843,39 @@ def handle_api_error(call, error_msg, price_syp=None):
 def show_topup_offers_handler(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
-    show_topup_offers(message)
+    
+    # التحقق من ضرورة التحديث
+    if not PUBG_OFFERS or (LAST_PUBG_UPDATE and (time.time() - LAST_PUBG_UPDATE) > PUBG_UPDATE_INTERVAL):
+        try:
+            update_pubg_offers()
+            if not PUBG_OFFERS:
+                bot.send_message(message.chat.id, "⚠️ جاري تحديث العروض، يرجى المحاولة بعد قليل")
+                return
+        except Exception as e:
+            print(f"Error updating PUBG offers: {str(e)}")
+            # الاستمرار باستخدام البيانات القديمة إذا فشل التحديث
+    
+    if not PUBG_OFFERS:
+        bot.send_message(message.chat.id, "⚠️ لا توجد عروض متاحة حالياً.")
+        return
+    
+    try:
+        markup = types.InlineKeyboardMarkup()
+        for offer in sorted(PUBG_OFFERS, key=lambda x: convert_to_syp(x.get('unit_price', 0))):
+            if offer.get('stock', 0) > 0:
+                try:
+                    price_syp = convert_to_syp(offer['unit_price'])
+                    btn_text = f"{offer['title']} - {price_syp:,} ل.س"
+                    markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"topup_{offer['id']}"))
+                except Exception as e:
+                    print(f"Skipping invalid offer: {str(e)}")
+                    continue
+
+        bot.send_message(message.chat.id, "🎮 عروض التعبئة المتاحة حالياً:", reply_markup=markup)
+        
+    except Exception as e:
+        print(f"Error showing PUBG offers: {str(e)}")
+        bot.send_message(message.chat.id, "❌ حدث خطأ في عرض العروض!")
 
 @bot.message_handler(func=lambda msg: msg.text == 'لوحة التحكم ⚙️' and is_admin(msg.from_user.id))
 def admin_panel_handler(message):
@@ -1849,7 +1913,28 @@ def manage_manual_categories(call):
         call.message.message_id,
         reply_markup=markup
     )
-
+@bot.callback_query_handler(func=lambda call: call.data.startswith('topup_'))
+def handle_topup_selection(call):
+    try:
+        offer_id = call.data.split('_')[1]
+        
+        # البحث عن العرض في البيانات المحلية
+        offer = next((o for o in PUBG_OFFERS if str(o['id']) == offer_id), None)
+        
+        if not offer:
+            bot.answer_callback_query(call.id, "⚠️ هذا العرض غير متوفر حالياً")
+            return
+            
+        bot.send_message(
+            call.message.chat.id,
+            "🎮 الرجاء إدخال رقم اللاعب في PUBG Mobile:",
+            reply_markup=types.ForceReply(selective=True)
+        )
+        bot.register_next_step_handler(call.message, process_topup_purchase, offer)
+        
+    except Exception as e:
+        print(f"Error in topup selection: {str(e)}")
+        bot.send_message(call.message.chat.id, "❌ حدث خطأ في اختيار العرض!")
 @bot.callback_query_handler(func=lambda call: call.data == 'add_manual_category')
 def add_manual_category(call):
     msg = bot.send_message(call.message.chat.id, "أرسل اسم الفئة الجديدة:")
@@ -2762,59 +2847,33 @@ def process_reject_reason(message, order_id, admin_id, admin_message_id):
             message.chat.id,
             f"❌ حدث خطأ أثناء رفض الطلب: {str(e)}"
         )
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_topup_'))
 def handle_topup_confirmation(call):
     try:
-        # التحقق إذا كانت العملية قيد المعالجة
-        if hasattr(call, 'processed') and call.processed:
-            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
-            return
+        # إخفاء الأزرار فوراً وتغيير الرسالة
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="⏳",
+            reply_markup=None
+        )
         
-        # وضع علامة أن الطلب قيد المعالجة
-        call.processed = True
-        
-        # تعطيل الزر في الواجهة
-        try:
-            bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
-        except:
-            pass
         parts = call.data.split('_')
         offer_id = parts[2]
         player_id = parts[3]
+        price_syp = int(parts[4])
         user_id = call.from_user.id
         
-        # جلب تفاصيل العرض
-        headers = {'X-API-Key': G2BULK_API_KEY}
-        response = requests.get(
-            f"{BASE_URL}topup/pubgMobile/offers",
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            bot.answer_callback_query(call.id, "❌ فشل في جلب تفاصيل العرض")
-            return
-            
-        offers = response.json().get('offers', [])
-        offer = next((o for o in offers if str(o['id']) == offer_id), None)
+        # جلب تفاصيل العرض من البيانات المحلية
+        offer = next((o for o in PUBG_OFFERS if str(o['id']) == offer_id), None)
         
         if not offer:
-            bot.answer_callback_query(call.id, "❌ العرض غير متوفر")
-            return
+            raise ValueError("العرض غير متوفر")
             
-        price_syp = convert_to_syp(offer['unit_price'])
+        if get_balance(user_id) < price_syp:
+            raise ValueError("رصيدك غير كافي")
         
-        # التحقق من الرصيد
-        if get_balance(user_id) < price_syp:
-            bot.answer_callback_query(call.id, "❌ رصيدك غير كافي!")
-            return
-        if get_balance(user_id) < price_syp:
-            bot.edit_message_text(
-                "❌ رصيدك غير كافي!",
-                call.message.chat.id,
-                call.message.message_id
-            )
-            return        
         # تنفيذ عملية الشراء
         purchase_response = requests.post(
             f"{BASE_URL}topup/pubgMobile/offers/{offer_id}/purchase",
@@ -2827,59 +2886,69 @@ def handle_topup_confirmation(call):
             update_balance(user_id, -price_syp)
             result = purchase_response.json()
             
-            # إرسال تأكيد للمستخدم
-            bot.edit_message_text(
+            # تعديل الرسالة إلى النتيجة النهائية
+            success_msg = (
                 f"✅ تمت عملية الشراء بنجاح!\n\n"
                 f"📌 العرض: {offer['title']}\n"
                 f"👤 رقم اللاعب: {player_id}\n"
-                f"💳 المبلغ: {price_syp} ل.س\n"
-                f"🆔 رقم العملية: {result.get('topup_id', 'غير متوفر')}",
-                call.message.chat.id,
-                call.message.message_id
+                f"💳 المبلغ: {price_syp:,} ل.س\n"
+                f"🆔 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
+            )
+            
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=success_msg
             )
             
             # إشعار الأدمن
             admin_msg = (
                 f"🛒 عملية شراء جديدة\n"
-                f"#PUBG_Mobile \n\n"
+                f"#PUBG_Mobile\n\n"
                 f"👤 المستخدم: {user_id}\n"
                 f"🎮 العرض: {offer['title']}\n"
                 f"🆔 اللاعب: {player_id}\n"
-                f"💰 المبلغ: {price_syp} ل.س\n"
+                f"💰 المبلغ: {price_syp:,} ل.س\n"
                 f"📌 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
             )
+            
             channel_id = get_notification_channel()
             if channel_id:
                 try:
                     bot.send_message(channel_id, admin_msg)
                 except Exception as e:
                     print(f"Failed to send to channel: {str(e)}")
-                    # Fallback to admin if channel fails
                     bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
             else:
                 bot.send_message(ADMIN_ID, admin_msg)
+                
         else:
-            error_msg = "يرجى ابلاغ الدعم"
-            bot.edit_message_text(
-                f"❌ فشلت العملية: {error_msg}",
-                call.message.chat.id,
-                call.message.message_id
-            )
+            error_msg = purchase_response.json().get('message', 'فشلت العملية دون تفاصيل')
+            raise Exception(error_msg)
             
     except Exception as e:
-        bot.edit_message_text(
-            "❌ حدث خطأ غير متوقع! يرجى المحاولة لاحقاً",
-            call.message.chat.id,
-            call.message.message_id
-        )
+        error_msg = f"❌ فشلت العملية: {str(e)}"
+        try:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=error_msg
+            )
+        except:
+            bot.send_message(call.message.chat.id, error_msg)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_topup_'))
 def handle_topup_cancel(call):
-    bot.edit_message_text(
-        "❌ تم إلغاء العملية",
-        call.message.chat.id,
-        call.message.message_id
-    )
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="❌ تم إلغاء العملية",
+            reply_markup=None
+        )
+    except Exception as e:
+        print(f"Error cancelling topup: {str(e)}")
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('send_order_details_'))
 def send_order_details_to_user(call):
     order_id = call.data.split('_')[3]
@@ -3920,61 +3989,46 @@ def toggle_category_status(message, category_id):
     manage_categories(message)
 
 # ============= معالجة الشراء =============
-def process_topup_purchase(message, offer_id):
+def process_topup_purchase(message, offer):
     try:
         user_id = message.from_user.id
         player_id = message.text.strip()
 
-        # التحقق من رقم اللاعب (8-12 رقمًا)
         if not (player_id.isdigit() and 8 <= len(player_id) <= 12):
-            bot.send_message(message.chat.id, "❌ رقم اللاعب غير صالح! يجب أن يحتوي على 8 إلى 12 رقمًا فقط.")
-            return
+            raise ValueError("رقم اللاعب غير صالح! يجب أن يحتوي على 8 إلى 12 رقمًا فقط")
 
-        headers = {'X-API-Key': G2BULK_API_KEY}
-        response = requests.get(
-            f"{BASE_URL}topup/pubgMobile/offers",
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            bot.send_message(message.chat.id, "❌ فشل في جلب تفاصيل العرض")
-            return
-            
-        offers = response.json().get('offers', [])
-        offer = next((o for o in offers if str(o['id']) == offer_id), None)
-        
-        if not offer:
-            bot.send_message(message.chat.id, "❌ العرض غير متوفر")
-            return
-            
         price_syp = convert_to_syp(offer['unit_price'])
         
-        # التحقق من الرصيد
         if get_balance(user_id) < price_syp:
-            bot.send_message(message.chat.id, 
-                           f"⚠️ الرصيد المطلوب: {price_syp} ل.س\nرصيدك الحالي: {get_balance(user_id)} ل.س")
-            return
+            raise ValueError(f"رصيدك غير كافي. السعر: {price_syp:,} ل.س")
             
-        # إنشاء واجهة المعاينة
-        preview_text = (
-            f"🛒 تأكيد عملية الشراء\n\n"
+        # إنشاء لوحة أزرار التأكيد
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f'confirm_topup_{offer["id"]}_{player_id}_{price_syp}'),
+            types.InlineKeyboardButton("❌ إلغاء", callback_data=f'cancel_topup_{offer["id"]}')
+        )
+        
+        # إرسال رسالة التأكيد
+        confirmation_msg = (
+            f"🛒 تأكيد عملية الشراء:\n\n"
             f"📌 العرض: {offer['title']}\n"
-            f"💰 السعر: {price_syp} ل.س\n"
-            f"👤 رقم اللاعب: {player_id}\n\n"
+            f"💰 السعر: {price_syp:,} ل.س\n"
+            f"👤 ID اللاعب: {player_id}\n\n"
             f"هل أنت متأكد من المعلومات أعلاه؟"
         )
         
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f'confirm_topup_{offer_id}_{player_id}'),
-            types.InlineKeyboardButton("❌ إلغاء", callback_data=f'cancel_topup_{offer_id}')
+        bot.send_message(
+            message.chat.id,
+            confirmation_msg,
+            reply_markup=markup
         )
         
-        bot.send_message(message.chat.id, preview_text, reply_markup=markup)
-        
+    except ValueError as e:
+        bot.send_message(message.chat.id, f"❌ {str(e)}")
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+        print(f"Error in purchase process: {str(e)}")
+        bot.send_message(message.chat.id, "❌ حدث خطأ غير متوقع في المعالجة!")
 
     
 def handle_purchase(message, product_id, quantity):
