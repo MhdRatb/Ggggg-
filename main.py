@@ -221,8 +221,6 @@ bot = telebot.TeleBot(API_KEY)
 
 def initialize_database():
 
-
-    
     safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -766,7 +764,8 @@ def main_menu(user_id):
         ('أكواد وبطاقات', 'cards'),
         ('🛍️ المنتجات اليدوية', 'manual'),
         ('طلباتي 🗂️', 'orders'),
-        ('رصيدي 💰', 'balance')
+        ('رصيدي 💰', 'balance'),
+        ('📞 الدعم', 'support')
     ]
     
     # تصفية الأزرار المعطلة
@@ -790,6 +789,16 @@ def send_welcome(message):
     user_id = message.from_user.id
     update_balance(user_id, 0)
     bot.send_message(message.chat.id, "مرحبا بكم في متجر GG STORE !", reply_markup=main_menu(user_id))
+@bot.message_handler(func=lambda msg: msg.text == '📞 الدعم')
+def support_info_handler(message):
+    support_text = (
+        "📬 تواصل مع الدعم في حال واجهت أي مشاكل \n\n"
+        "🔹 حساب الدعم : @GG_Store_Support \n\n"
+        "📬 لمتابعة اخر التحديثات والعروض \n\n"
+        "🔹 قناة البوت : @GGStoreSy \n\n"
+
+    )
+    bot.send_message(message.chat.id, support_text)
 @bot.message_handler(func=lambda msg: msg.text == '🔙 الرجوع للقائمة الرئيسية')
 def back_to_main_menu(message):
     bot.send_message(
@@ -1055,7 +1064,7 @@ def handle_freefire2_offer_selection(call):
             
         bot.send_message(
             call.message.chat.id,
-            "🎮 الرجاء إدخال ID اللاعب في Free Fire:",
+            "أدخل ID أو رقم اللاعب :",
             reply_markup=types.ForceReply(selective=True)
         )
         bot.register_next_step_handler(
@@ -1125,7 +1134,8 @@ def confirm_freefire2_purchase(call):
         player_id = parts[3]
         price_syp = int(parts[4])
         user_id = call.from_user.id
-        
+        username = f"@{call.from_user.username}" if call.from_user.username else "غير متوفر"
+        user_name = f"{call.from_user.first_name or ''} {call.from_user.last_name or ''}".strip()
         # البحث عن المنتج في القائمة المحلية
         product = next((p for p in FREE_FIRE2_PRODUCTS if str(p['offerName']) == product_id), None)
         
@@ -1171,9 +1181,9 @@ def confirm_freefire2_purchase(call):
             # إرسال تأكيد للمستخدم
             bot.edit_message_text(
                 f"✅ تمت عملية الشراء بنجاح!\n\n"
-                f"📌 العرض: {product['offerName']}\n"
-                f"🆔 ID اللاعب: {player_id}\n"
-                f"💳 المبلغ: {price_syp:,} ل.س\n"
+                f"📌 المنتج: {product['offerName']}\n"
+                f"🆔 آيدي اللاعب: {player_id}\n"
+                f"💳 السعر: {price_syp:,} ل.س\n"
                 f"📌 رقم العملية: {order_id}",
                 call.message.chat.id,
                 call.message.message_id
@@ -1183,7 +1193,9 @@ def confirm_freefire2_purchase(call):
             admin_msg = (
                 f"🛒 عملية شراء جديدة\n"
                 f" #Free_Fire_imabou\n\n"
-                f"👤 المستخدم: {user_id}\n"
+                f"👤 الاسم: {user_name}\n"
+                f"👤 المستخدم: {username}\n"
+                f"🆔 ID: {user_id}\n"
                 f"📌 العرض: {product['offerName']}\n"
                 f"🆔 اللاعب: {player_id}\n"
                 f"💰 المبلغ: {price_syp} ل.س\n"
@@ -1220,19 +1232,6 @@ def confirm_freefire2_purchase(call):
             f"⚠️ خطأ في عملية شراء Free Fire 2\nUser: {call.from_user.id}\nError: {str(e)}"
         )
 #============== free fire 2 end ====================
-@bot.message_handler(func=lambda msg: msg.text == 'رصيدي 💰')
-def show_balance_handler(message):
-    if is_bot_paused() and not is_admin(message.from_user.id):
-        return
-    try:
-        user_id = message.from_user.id
-        balance = get_balance(user_id)
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("إعادة تعبئة الرصيد 💳", callback_data="recharge_balance"))
-        bot.send_message(message.chat.id, f"رصيدك الحالي: {balance} ل.س", reply_markup=markup)
-    except Exception as e:
-        bot.send_message(message.chat.id, "❌ حدث خطأ!")
-
 @bot.message_handler(func=lambda msg: msg.text == 'أكواد وبطاقات' and not is_button_disabled('cards'))
 
 def show_categories_handler(message):
@@ -1611,7 +1610,7 @@ def show_manual_products(call):
         "اختر المنتج المطلوب :",
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=markup
+        reply_markup=markup,
     )
 @bot.callback_query_handler(func=lambda call: call.data.startswith('manual_prod_'))
 def show_manual_product_details(call):
@@ -1667,7 +1666,7 @@ def handle_new_freefire_offer(call):
 
         msg = bot.send_message(
             call.message.chat.id,
-            "🎮 الرجاء إدخال ID اللاعب في Free Fire:",
+            "أدخل ID أو رقم اللاعب :",
             reply_markup=types.ForceReply(selective=True)
         )
         bot.register_next_step_handler(msg, process_new_freefire_purchase, product)
@@ -1717,7 +1716,8 @@ def confirm_new_freefire_purchase(call):
         parts = call.data.split('_')
         item_id, player_id, price_syp, item_name = parts[3], parts[4], int(parts[5]), parts[6]
         user_id = call.from_user.id
-
+        username = f"@{call.from_user.username}" if call.from_user.username else "غير متوفر"
+        user_name = f"{call.from_user.first_name or ''} {call.from_user.last_name or ''}".strip()
         order_id = generate_order_id()
         payload = {
             "player_id": player_id,
@@ -1752,9 +1752,9 @@ def confirm_new_freefire_purchase(call):
 
             bot.edit_message_text(
                 f"✅ تمت عملية الشراء بنجاح!\n\n"
-                f"📌 العرض: {item_name}\n"
-                f"🆔 ID اللاعب: {player_id}\n"
-                f"💳 المبلغ: {price_syp:,} ل.س\n"
+                f"📌 المنتج: {item_name}\n"
+                f"🆔 آيدي اللاعب: {player_id}\n"
+                f"💳 السعر: {price_syp:,} ل.س\n"
                 f"📌 رقم العملية: {order_id_db}",
                 call.message.chat.id,
                 call.message.message_id
@@ -1763,7 +1763,9 @@ def confirm_new_freefire_purchase(call):
             admin_msg = (
                 f"🛒 عملية شراء جديدة\n"
                 f" #Free_Fire_AllTopup\n\n"
-                f"👤 المستخدم: {user_id}\n"
+                f"👤 الاسم: {user_name}\n"
+                f"👤 المستخدم: {username}\n"
+                f"🆔 ID: {user_id}\n"
                 f"📌 العرض: {item_name}\n"
                 f"🆔 اللاعب: {player_id}\n"
                 f"💰 المبلغ: {price_syp} ل.س\n"
@@ -1778,8 +1780,7 @@ def confirm_new_freefire_purchase(call):
                     # Fallback to admin if channel fails
                     bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
         else:
-            err = response.json().get('حاول مرة اخرى لاحقاً')
-            bot.edit_message_text(f"❌ فشلت العملية: {err}", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(f"❌ فشلت العملية: حاول مرة أخرى لاحقاً", call.message.chat.id, call.message.message_id)
 
     except Exception as e:
         print(f"Confirm Error: {str(e)}")
@@ -1927,7 +1928,7 @@ def handle_topup_selection(call):
             
         bot.send_message(
             call.message.chat.id,
-            "🎮 الرجاء إدخال رقم اللاعب في PUBG Mobile:",
+            "أدخل ID اللاعب :",
             reply_markup=types.ForceReply(selective=True)
         )
         bot.register_next_step_handler(call.message, process_topup_purchase, offer)
@@ -2244,7 +2245,7 @@ def handle_recharge_decision(call):
             ''', (request_id,))
             bot.send_message(
                 user_id,
-                f"⚠️ تم رفض طلبك لإعادة الشحن.\n\nللاستفسار، تواصل مع الإدارة."
+                f"يرجى التأكد من رقم العملية أو صورة الاشعار وإعادة المحاولة ⚠️"
             )
 
         # تحديث رسالة الأدمن
@@ -2410,7 +2411,7 @@ def handle_manual_purchase(call):
         
         # إذا كان المنتج يتطلب معرف لاعب
         if requires_id:
-            msg = bot.send_message(call.message.chat.id, "الرجاء إدخال معرف اللاعب:")
+            msg = bot.send_message(call.message.chat.id, "أدخل ID أو رقم اللاعب :")
             bot.register_next_step_handler(msg, lambda m: process_player_id_for_purchase(m, product_id, price, user_id))
         else:
             # إذا كان لا يتطلب معرف لاعب، نكمل الشراء مباشرة
@@ -2864,7 +2865,8 @@ def handle_topup_confirmation(call):
         player_id = parts[3]
         price_syp = int(parts[4])
         user_id = call.from_user.id
-        
+        username = f"@{call.from_user.username}" if call.from_user.username else "غير متوفر"
+        user_name = f"{call.from_user.first_name or ''} {call.from_user.last_name or ''}".strip()
         # جلب تفاصيل العرض من البيانات المحلية
         offer = next((o for o in PUBG_OFFERS if str(o['id']) == offer_id), None)
         
@@ -2889,9 +2891,9 @@ def handle_topup_confirmation(call):
             # تعديل الرسالة إلى النتيجة النهائية
             success_msg = (
                 f"✅ تمت عملية الشراء بنجاح!\n\n"
-                f"📌 العرض: {offer['title']}\n"
-                f"👤 رقم اللاعب: {player_id}\n"
-                f"💳 المبلغ: {price_syp:,} ل.س\n"
+                f"📌 المنتج: {offer['title']}\n"
+                f"👤 آيدي اللاعب: {player_id}\n"
+                f"💳 السعر: {price_syp:,} ل.س\n"
                 f"🆔 رقم العملية: {result.get('topup_id', 'غير متوفر')}"
             )
             
@@ -2904,8 +2906,10 @@ def handle_topup_confirmation(call):
             # إشعار الأدمن
             admin_msg = (
                 f"🛒 عملية شراء جديدة\n"
-                f"#PUBG_Mobile\n\n"
-                f"👤 المستخدم: {user_id}\n"
+                f" #PUBG_Mobile\n\n"
+                f"👤 الاسم: {user_name}\n"
+                f"👤 المستخدم: {username}\n"
+                f"🆔 ID: {user_id}\n"
                 f"🎮 العرض: {offer['title']}\n"
                 f"🆔 اللاعب: {player_id}\n"
                 f"💰 المبلغ: {price_syp:,} ل.س\n"
@@ -3282,7 +3286,7 @@ def handle_callback(call):
         bot.register_next_step_handler(msg, process_exchange_rate_update)
     elif data.startswith('topup_'):
         offer_id = data.split('_')[1]
-        msg = bot.send_message(call.message.chat.id, " الرجاء إدخال رقم اللاعب:")
+        msg = bot.send_message(call.message.chat.id, "أدخل ID أو رقم اللاعب :")
         bot.register_next_step_handler(msg, process_topup_purchase, offer_id)
     elif data == 'recharge_balance':
         handle_recharge_request(call.message)
@@ -3619,7 +3623,7 @@ def handle_recharge_request(message):
         
         msg = bot.send_message(
             message.chat.id,
-            "💰 الرجاء إدخال المبلغ الذي تريد إرساله (بين 1000 و540000 ليرة سورية):",
+            "💰 الرجاء إدخال المبلغ الذي تريد إرساله (بين 1000 و545000 ليرة سورية):",
             reply_markup=markup
         )
         bot.register_next_step_handler(msg, process_recharge_amount)
@@ -3637,8 +3641,8 @@ def process_recharge_amount(message):
             return
             
         amount = int(message.text)
-        if amount < 1000 or amount > 540000:
-            raise ValueError("المبلغ يجب أن يكون بين 1000 و540000 ليرة سورية")
+        if amount < 1000 or amount > 545000:
+            raise ValueError("المبلغ يجب أن يكون بين 1000 و545000 ليرة سورية")
 
         # التحقق مرة أخرى لمنع الثغرات
         active_requests = safe_db_execute('''
