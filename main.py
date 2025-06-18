@@ -11,7 +11,6 @@ from telebot import types
 from datetime import datetime
 from threading import Lock
 from dotenv import load_dotenv
-
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 ADMIN_ID = 5134156042
