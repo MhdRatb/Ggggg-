@@ -35,7 +35,7 @@ FREE_FIRE2_PRODUCTS = []
 PUBG_OFFERS = []
 LAST_PUBG_UPDATE = None
 PUBG_UPDATE_INTERVAL = 900  # 15 دقيقة بالثواني
-
+PUBG_MANUAL_CATEGORY_ID = 20
 # أضف هذه الدالة لتحديث العروض
 def update_pubg_offers():
     global PUBG_OFFERS, LAST_PUBG_UPDATE
@@ -468,9 +468,11 @@ def log_user_order(user_id, order_type, product_id, product_name, price, player_
         print(f"Error logging order: {str(e)}")
         return None
 def convert_to_syp(usd_amount):
-    """تحويل مع تعزيز معالجة الأخطاء."""
+    """تحويل من الدولار إلى الليرة مع تقريب لأقرب 100"""
     try:
-        return int(float(usd_amount) * get_exchange_rate())
+        raw = float(usd_amount) * get_exchange_rate()
+        rounded = int(round(raw / 100.0)) * 100
+        return rounded
     except (ValueError, TypeError) as e:
         print(f"Conversion error: {str(e)}")
         raise ValueError("❌ سعر المنتج غير صالح")
@@ -759,8 +761,8 @@ def main_menu(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
     
     buttons = [
-        ('⚡PUBG MOBILE⚡', 'pubg'),
-        ('🔥FREE FIRE🔥', 'freefire'),
+        ('PUBG MOBILE ⚡', 'pubg'),
+        ('FREE FIRE 🔥', 'freefire'),
         ('أكواد وبطاقات', 'cards'),
         ('🛍️ المنتجات اليدوية', 'manual'),
         ('طلباتي 🗂️', 'orders'),
@@ -789,6 +791,58 @@ def send_welcome(message):
     user_id = message.from_user.id
     update_balance(user_id, 0)
     bot.send_message(message.chat.id, "مرحبا بكم في متجر GG STORE !", reply_markup=main_menu(user_id))
+@bot.message_handler(commands=['broadcast'])
+def start_broadcast(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    msg = bot.send_message(message.chat.id, "📝 أرسل الرسالة التي تريد إذاعتها لجميع المستخدمين:")
+    bot.register_next_step_handler(msg, confirm_broadcast_message)
+def confirm_broadcast_message(message):
+    text = message.text
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("✅ نعم، أرسل", callback_data=f'send_broadcast_{text}'),
+        types.InlineKeyboardButton("❌ إلغاء", callback_data='cancel_broadcast')
+    )
+
+    bot.send_message(message.chat.id, f"📬 تأكيد إرسال الرسالة التالية:\n\n{text}", reply_markup=markup)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('send_broadcast_'))
+def send_broadcast_to_all(call):
+    text = call.data.replace('send_broadcast_', '', 1)
+
+    users = safe_db_execute("SELECT user_id FROM users")
+    sent, failed = 0, 0
+
+    for (user_id,) in users:
+        try:
+            bot.send_message(user_id, text)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"❌ فشل إرسال إلى {user_id}: {e}")
+
+    bot.edit_message_text(
+        f"✅ تم إرسال الرسالة لـ {sent} مستخدم.\n❌ فشل الإرسال إلى {failed}.",
+        call.message.chat.id,
+        call.message.message_id
+    )
+
+@bot.message_handler(commands=['list_manual_categories'])
+def list_manual_categories(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    categories = safe_db_execute("SELECT id, name FROM manual_categories")
+    if not categories:
+        bot.send_message(message.chat.id, "⚠️ لا توجد فئات يدوية")
+        return
+
+    text = "📚 الفئات اليدوية المتوفرة:\n\n"
+    for cat_id, name in categories:
+        text += f"🔹 {name} (ID: {cat_id})\n"
+    
+    bot.send_message(message.chat.id, text)
 @bot.message_handler(func=lambda msg: msg.text == '📞 الدعم')
 def support_info_handler(message):
     support_text = (
@@ -806,7 +860,7 @@ def back_to_main_menu(message):
         "مرحبا بكم في متجر GG STORE !",
         reply_markup=main_menu(message.from_user.id)
     )
-@bot.message_handler(func=lambda msg: msg.text == '🔥FREE FIRE🔥' and not is_button_disabled('freefire'))
+@bot.message_handler(func=lambda msg: msg.text == 'FREE FIRE 🔥' and not is_button_disabled('freefire'))
 
 def free_fire_main_menu(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
@@ -1021,7 +1075,7 @@ def handle_execute_remove_admin(call):
         call.message.message_id
     )
 #========== free fire 2 ==================
-@bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 2')
+@bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 2'and not is_button_disabled('freefire'))
 def show_freefire2_offers_handler(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
@@ -1252,7 +1306,8 @@ def show_manual_categories(message):
     markup = types.InlineKeyboardMarkup()
     for cat_id, cat_name in categories:
         markup.add(types.InlineKeyboardButton(cat_name, callback_data=f'manual_cat_{cat_id}'))
-    
+    if is_admin(message.from_user.id):
+        markup.add(types.InlineKeyboardButton("إدارة", callback_data='manage_manual'))
     bot.send_message(message.chat.id, "اختر احد الفئات :", reply_markup=markup)
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_manual_prod_'))
 def edit_manual_product(call):
@@ -1386,14 +1441,15 @@ def handle_total_balances(call):
 def handle_user_management(call):
     markup = types.InlineKeyboardMarkup()
     
-    markup.add(
+    markup.row(
         types.InlineKeyboardButton('بحث بالآيدي', callback_data='search_by_id'),
-        types.InlineKeyboardButton('بحث بالاسم', callback_data='search_by_name'),
+        types.InlineKeyboardButton('بحث بالاسم', callback_data='search_by_name'))
+    markup.row(
         types.InlineKeyboardButton('إجمالي أرصدة المستخدمين', callback_data='total_balances'),
-        types.InlineKeyboardButton('خصم من المستخدم', callback_data='deduct_balance'),
+        types.InlineKeyboardButton('خصم من المستخدم', callback_data='deduct_balance'))
+    markup.row(
         types.InlineKeyboardButton('تعديل رصيد مستخدم', callback_data='edit_balance'),
-        types.InlineKeyboardButton('رجوع', callback_data='admin_panel')
-    )
+        types.InlineKeyboardButton('رجوع', callback_data='admin_panel'))
     
     bot.edit_message_text(
         "إدارة المستخدمين:",
@@ -1405,13 +1461,15 @@ def handle_user_management(call):
 def handle_manage_manual(call):
     markup = types.InlineKeyboardMarkup()
     
-    markup.add(
+    markup.row(
         types.InlineKeyboardButton('المنتجات', callback_data='manage_manual_products'),
         types.InlineKeyboardButton('الفئات', callback_data='manage_manual_categories'),
+
+    )
+    markup.row(
         types.InlineKeyboardButton('الطلبات', callback_data='manage_manual_orders'),
         types.InlineKeyboardButton('رجوع', callback_data='admin_panel')
     )
-    
     bot.edit_message_text(
         "إدارة المستخدمين:",
         call.message.chat.id,
@@ -1593,7 +1651,7 @@ def toggle_product_player_id(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('manual_cat_'))
 def show_manual_products(call):
     category_id = call.data.split('_')[2]
-    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=?", (category_id,))
+    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? ORDER BY price ASC", (category_id,))
     
     if not products:
         bot.send_message(call.message.chat.id, "⚠️ لا توجد منتجات في هذه الفئة")
@@ -1602,7 +1660,7 @@ def show_manual_products(call):
     markup = types.InlineKeyboardMarkup()
     for prod_id, prod_name, prod_price in products:
         markup.add(types.InlineKeyboardButton(
-            f"{prod_name} - {int(prod_price*exchange_rate)} ل.س",
+            f"{prod_name} - {convert_to_syp(prod_price)} ل.س",
             callback_data=f'manual_prod_{prod_id}'
         ))
     
@@ -1622,8 +1680,7 @@ def show_manual_product_details(call):
         return
 
     name, price_usd, desc, requires_id = product[0]
-    exchange_rate = get_exchange_rate()
-    price_syp = int(price_usd * exchange_rate)  # تحويل السعر إلى ليرة
+    price_syp = convert_to_syp(price_usd)  # تحويل السعر إلى ليرة
 
     text = (
         f"🛍️ {name}\n"
@@ -1640,7 +1697,7 @@ def show_manual_product_details(call):
         call.message.message_id,
         reply_markup=markup
     )
-@bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 1')
+@bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 1'and not is_button_disabled('freefire'))
 def show_new_freefire_products(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
@@ -1840,7 +1897,29 @@ def handle_api_error(call, error_msg, price_syp=None):
         )
     except Exception as e:
         print(f"Error in error handling: {str(e)}")
-@bot.message_handler(func=lambda msg: msg.text == '⚡PUBG MOBILE⚡' and not is_button_disabled('pubg'))
+@bot.message_handler(func=lambda msg: msg.text == 'PUBG MOBILE ⚡'and not is_button_disabled('pubg'))
+def pubg_main_menu(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    markup.row('Auto ⚡', 'يدوي 👨🏻‍💻')
+    markup.row('🔙 الرجوع للقائمة الرئيسية')
+    bot.send_message(message.chat.id, "يرجى اختيار نوع الشحن:", reply_markup=markup)
+@bot.message_handler(func=lambda msg: msg.text == 'يدوي 👨🏻‍💻' and not is_button_disabled('pubg'))
+def show_pubg_manual_products(message):
+    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? ORDER BY price ASC", (PUBG_MANUAL_CATEGORY_ID,))
+    if not products:
+        bot.send_message(message.chat.id, "⚠️ لا توجد منتجات PUBG يدوية حالياً")
+        return
+
+    markup = types.InlineKeyboardMarkup()
+    for prod_id, name, price in products:
+        syp_price = convert_to_syp(price)
+        markup.add(types.InlineKeyboardButton(f"{name} - {syp_price:,} ل.س", callback_data=f'manual_prod_{prod_id}'))
+    bot.send_message(message.chat.id,
+                    f"تستغرق عملية المعالجة من 10 دقائق الى نصف ساعة \n"
+                    f"اختر المنتج الذي تريده:\n",
+                    reply_markup=markup)
+
+@bot.message_handler(func=lambda msg: msg.text == 'Auto ⚡' and not is_button_disabled('pubg'))
 def show_topup_offers_handler(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
         return
@@ -1907,7 +1986,7 @@ def manage_manual_categories(call):
             callback_data=f'delete_manual_cat_{cat_id}'
         ))
     
-    markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='admin_panel'))
+    markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='manage_manual'))
     bot.edit_message_text(
         "إدارة الفئات اليدوية:",
         call.message.chat.id,
@@ -1973,7 +2052,7 @@ def manage_manual_products(call):
         else:
             markup.add(types.InlineKeyboardButton("⚠️ لا توجد منتجات", callback_data='no_products'))
         
-        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data=f'admin_panel'))
+        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data=f'manage_manual'))
         
         # إضافة علامة زمنية للنص لتجنب التكرار
         bot.edit_message_text(
@@ -2404,9 +2483,8 @@ def handle_manual_purchase(call):
         name, price, requires_id = product[0]
         user_id = call.from_user.id
         balance = get_balance(user_id)
-        exchange_rate = get_exchange_rate()
-        if balance < price:
-            bot.send_message(call.message.chat.id, f"⚠️ رصيدك غير كافي. السعر: {int(price*exchange_rate)} ل.س | رصيدك: {balance} ل.س")
+        if balance < convert_to_syp(price):
+            bot.send_message(call.message.chat.id, f"⚠️ رصيدك غير كافي. السعر: {convert_to_syp(price)} ل.س | رصيدك: {balance} ل.س")
             return
         
         # إذا كان المنتج يتطلب معرف لاعب
@@ -2443,8 +2521,7 @@ def complete_manual_purchase_with_deduction(message, product_id, price, user_id=
             user_id = message.from_user.id
 
         product_name = safe_db_execute('SELECT name FROM manual_products WHERE id=?', (product_id,))[0][0]
-        exchange_rate = get_exchange_rate()
-        price_syp = int(price * exchange_rate)
+        price_syp = convert_to_syp(price)
 
         if get_balance(user_id) < price_syp:
             bot.send_message(message.chat.id, f"⚠️ رصيدك غير كافي. السعر: {price_syp:,} ل.س")
