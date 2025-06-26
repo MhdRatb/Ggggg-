@@ -2508,7 +2508,8 @@ def process_manual_quantity_purchase(message, product_id, price_usd, user_id):
             f"هل أنت متأكد من المعلومات أعلاه؟",
             reply_markup=markup
         )
-        # لا تحرر القفل هنا، بل اتركه لـ confirm_manual_purchase أو cancel_purchase
+
+        user_processing_lock[user_id] = False
 
     except ValueError:
         bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح للكمية!")
@@ -2517,7 +2518,7 @@ def process_manual_quantity_purchase(message, product_id, price_usd, user_id):
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
         user_processing_lock[user_id] = False
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(('confirm_manual_','confirm_manual_qty_')))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('confirm_manual_', 'confirm_manual_qty_')))
 def confirm_manual_purchase(call):
     user_id = call.from_user.id
     if user_processing_lock.get(user_id, False):
@@ -2535,18 +2536,34 @@ def confirm_manual_purchase(call):
         bot.answer_callback_query(call.id, "⏳ جاري معالجة طلبك...")
 
         parts = call.data.split('_')
-        product_id = int(parts[2])
-        price_syp = int(parts[3])
+        product_id = None
+        price_syp = 0 
         player_id = None
-        quantity = 1 # افتراضي
-        
+        quantity = 1 
+
         if call.data.startswith('confirm_manual_qty_'):
-            quantity = int(parts[4])
-        else: # confirm_manual_
-            if len(parts) > 4: # إذا كان هناك معرف لاعب
+            if len(parts) < 5:
+                raise ValueError("Callback data for quantity purchase is incomplete.")
+            product_id = int(parts[3]) 
+            price_syp = int(parts[4])
+            quantity = int(parts[5]) 
+
+
+        elif call.data.startswith('confirm_manual_'):
+            if len(parts) < 4: 
+                raise ValueError("Callback data for single item purchase is incomplete.")
+            product_id = int(parts[2]) 
+            price_syp = int(parts[3])
+            if len(parts) > 4: 
                 player_id = parts[4]
 
-        product_name = safe_db_execute('SELECT name FROM manual_products WHERE id=?', (product_id,))[0][0]
+        else:
+            raise ValueError("Unknown manual purchase callback data format.")
+
+        product_name_query = safe_db_execute('SELECT name FROM manual_products WHERE id=?', (product_id,))
+        if not product_name_query:
+            raise ValueError("Product not found in database.")
+        product_name = product_name_query[0][0]
 
         if get_balance(user_id) < price_syp:
             raise ValueError(f"رصيدك غير كافي. السعر: {price_syp:,} ل.س")
@@ -2566,17 +2583,21 @@ def confirm_manual_purchase(call):
         send_order_confirmation(user_id, order_id, product_name, price_syp, player_id)
         notify_admin(order_id, user_id, product_name, price_syp, player_id, order_type='manual')
 
+    except ValueError as ve:
+        error_message = f"❌ فشلت عملية الشراء: {str(ve)}"
+        bot.send_message(user_id, error_message)
+        bot.send_message(ADMIN_ID, f"⚠️ خطأ في عملية الشراء اليدوية للمستخدم {user_id}: {str(ve)}")
     except Exception as e:
-        # استعادة الرصيد إذا فشلت العملية بعد الخصم
-        update_balance(user_id, price_syp) 
-        bot.send_message(user_id, f"❌ فشلت عملية الشراء: {str(e)}")
+        error_message = f"❌ فشلت عملية الشراء: حدث خطأ غير متوقع. يرجى التواصل مع الدعم. {str(e)}"
+        bot.send_message(user_id, error_message)
         bot.send_message(
             ADMIN_ID, 
             f"⚠️ فشل في عملية الشراء اليدوية للمستخدم {user_id}: {str(e)}\n"
-            f"تمت استعادة رصيده."
+            f"يرجى التحقق من السجل."
         )
     finally:
-        user_processing_lock[user_id] = False # تحرير القفل
+        if user_id in user_processing_lock:
+            user_processing_lock[user_id] = False # تحرير القفل دائمًا
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delete_manual_cat_'))
