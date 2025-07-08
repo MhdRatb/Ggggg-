@@ -116,7 +116,8 @@ safe_db_execute('''CREATE TABLE IF NOT EXISTS bot_settings
              (key TEXT PRIMARY KEY, value TEXT)''')
 safe_db_execute('''CREATE TABLE IF NOT EXISTS manual_categories
              (id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL)''')
+              name TEXT NOT NULL,
+              is_active BOOLEAN DEFAULT TRUE)''')
 safe_db_execute('''CREATE TABLE IF NOT EXISTS freefire_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 transaction_id TEXT NOT NULL,
@@ -132,6 +133,7 @@ safe_db_execute('''CREATE TABLE IF NOT EXISTS manual_products
                 price REAL NOT NULL,
                 description TEXT,
                 requires_player_id BOOLEAN DEFAULT FALSE,
+                is_active BOOLEAN DEFAULT TRUE,
                 FOREIGN KEY(category_id) REFERENCES manual_categories(id))''')
 safe_db_execute('''CREATE TABLE IF NOT EXISTS manual_orders
                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +210,29 @@ if not safe_db_execute("SELECT * FROM bot_settings WHERE key='channel_id'"):
 
 bot = telebot.TeleBot(API_KEY)
 
+def ensure_manual_tables_updated():
+    try:
+        # التحقق من جدول الفئات
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(manual_categories)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'is_active' not in columns:
+            safe_db_execute("ALTER TABLE manual_categories ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
+            print("تمت إضافة العمود is_active إلى جدول manual_categories")
+
+        # التحقق من جدول المنتجات
+        cursor.execute("PRAGMA table_info(manual_products)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'is_active' not in columns:
+            safe_db_execute("ALTER TABLE manual_products ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
+            print("تمت إضافة العمود is_active إلى جدول manual_products")
+
+    except Exception as e:
+        print(f"خطأ في تحديث جداول المنتجات اليدوية: {str(e)}")
+    finally:
+        cursor.close()
+
+ensure_manual_tables_updated()
 # ============= إضافة الدوال للنسخ الاحتياطي والاستعادة =============
 def initialize_database():
     safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
@@ -352,6 +377,7 @@ def process_restore(message):
         shutil.move(temp_name, 'wallet.db')
         global conn
         conn = sqlite3.connect('wallet.db', check_same_thread=False)
+        ensure_manual_tables_updated()
         initialize_database()
         ensure_columns_exist()
         bot.send_message(message.chat.id, "✅ تم استعادة النسخة بنجاح مع تحديث الهيكل!")
@@ -601,7 +627,7 @@ def get_product_details(product_id):
         return None
 
 def send_order_confirmation(user_id, order_id, product_name, price, player_id=None):
-    """إرسال تأكيد الطلب للمستخدم"""
+    """إرسال تأكيد الطلب للمستخدم مع إظهار القائمة الرئيسية"""
     try:
         message = (
             f"✅ تمت عملية الشراء بنجاح!\n\n"
@@ -609,8 +635,10 @@ def send_order_confirmation(user_id, order_id, product_name, price, player_id=No
             f"📦 المنتج: {product_name}\n"
             f"💵 المبلغ: {price} ل.س\n"
             f"{f'👤 معرف اللاعب: {player_id}' if player_id else ''}\n\n"
+            f"طلبك قيد المعالجة من قبل الإدارة وسيتم إعلامك عند اكتماله."
         )
-        bot.send_message(user_id, message)
+        # تمت إضافة reply_markup لإظهار القائمة الرئيسية
+        bot.send_message(user_id, message, reply_markup=main_menu(user_id))
     except Exception as e:
         print(f"Error sending confirmation: {str(e)}")
 
@@ -1175,14 +1203,17 @@ def confirm_freefire2_purchase(call):
                     bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
             else:
                 bot.send_message(ADMIN_ID, admin_msg)
+
+            bot.send_message(call.message.chat.id, "⬇️ القائمة الرئيسية", reply_markup=main_menu(call.from_user.id))
         else:
             error_msg = response.json().get('message', 'فشلت العملية دون تفاصيل')
             raise Exception(error_msg)
+            
 
     except Exception as e:
         print(f"Purchase Error: {str(e)}")
         bot.edit_message_text(
-            f"❌ حدث خطأ غير متوقع! يرجى التواصل مع الدعم: {str(e)}",
+            f"❌ حدث خطأ غير متوقع! يرجى التواصل مع الدعم ",
             call.message.chat.id,
             call.message.message_id
         )
@@ -1202,26 +1233,28 @@ def show_categories_handler(message):
 
 @bot.message_handler(func=lambda msg: msg.text == '🛍️ المنتجات اليدوية' and not is_button_disabled('manual'))
 def show_manual_categories(message): 
-    # التحقق من إيقاف البوت لا يزال هنا
     if is_bot_paused() and not is_admin(message.from_user.id):
         bot.send_message(message.chat.id, "⏸️ البوت متوقف مؤقتًا.")
         return
-
-    categories = safe_db_execute("SELECT id, name FROM manual_categories")
     
-    markup = types.InlineKeyboardMarkup()
+    categories = safe_db_execute("SELECT id, name FROM manual_categories WHERE is_active = TRUE")
+    
     if not categories:
         bot.send_message(message.chat.id, "⚠️ لا توجد فئات متاحة حالياً.")
-        return # لا ترسل أزرار إذا لا توجد فئات
+        return
 
-    for cat_id, cat_name in categories:
-        markup.add(types.InlineKeyboardButton(cat_name, callback_data=f'manual_cat_{cat_id}'))
+    # تحديد عرض الصف ليكون 2
+    markup = types.InlineKeyboardMarkup(row_width=2)
     
-    if is_admin(message.from_user.id):
-        markup.add(types.InlineKeyboardButton("إدارة", callback_data='manage_manual'))
+    # إنشاء قائمة أزرار الفئات
+    category_buttons = [
+        types.InlineKeyboardButton(cat_name, callback_data=f'manual_cat_{cat_id}') 
+        for cat_id, cat_name in categories
+    ]
     
-    # هنا، دائمًا أرسل رسالة جديدة عندما يتم استدعاء هذه الدالة من message_handler
-    # لأن الرسالة الأصلية هي رسالة المستخدم ولا يمكن تعديلها.
+    # إضافة الأزرار دفعة واحدة ليتم ترتيبها تلقائيًا
+    markup.add(*category_buttons)
+    
     bot.send_message(message.chat.id, "اختر احد الفئات :", reply_markup=markup)
 
 
@@ -1250,42 +1283,63 @@ def _send_or_edit_manual_categories(chat_id, message_id, markup, text):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_manual_prod_'))
 def edit_manual_product(call):
-    try:
-        product_id = call.data.split('_')[3]
-        product = safe_db_execute("SELECT id, name, price, description FROM manual_products WHERE id=?", (product_id,))
-        if not product:
-            bot.answer_callback_query(call.id, "⚠️ المنتج غير موجود")
-            return
-        prod_id, name, price, desc = product[0]
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✏️ تعديل الاسم", callback_data=f'edit_prod_name_{prod_id}'),
-            types.InlineKeyboardButton("💵 تعديل السعر", callback_data=f'edit_prod_price_{prod_id}')
-        )
-        markup.row(
-            types.InlineKeyboardButton("📝 تعديل الوصف", callback_data=f'edit_prod_desc_{prod_id}'),
-            types.InlineKeyboardButton("🔄 تبديل حالة معرف اللاعب", callback_data=f'toggle_prod_id_{prod_id}')
-        )
-        markup.add(types.InlineKeyboardButton("🗑️ حذف المنتج", callback_data=f'delete_prod_{prod_id}'))
-        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='manage_manual_products'))
-        desc_text = desc if desc else "لا يوجد وصف"
-        text = (
-            f"🛍️ إدارة المنتج\n\n"
-            f"📌 الاسم: {name}\n"
-            f"💰 السعر: {price} ل.س\n"
-            f"📄 الوصف: {desc_text}\n"
-            f"🎮 معرف اللاعب مطلوب: {'نعم' if safe_db_execute('SELECT requires_player_id FROM manual_products WHERE id=?', (prod_id,))[0][0] else 'لا'}"
-        )
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-    except Exception as e:
-        print(f"Error in edit_manual_product: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ حدث خطأ أثناء التعديل")
+    product_id = call.data.split('_')[-1]
+    product = safe_db_execute("SELECT id, name, price, description, is_active, category_id, requires_player_id FROM manual_products WHERE id=?", (product_id,))
+    if not product:
+        bot.answer_callback_query(call.id, "⚠️ المنتج غير موجود")
+        return
+        
+    prod_id, name, price, desc, is_active, cat_id, req_id = product[0]
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    # زر التفعيل والتعطيل
+    toggle_text = "❌ تعطيل المنتج" if is_active else "✅ تفعيل المنتج"
+    markup.add(types.InlineKeyboardButton(toggle_text, callback_data=f'toggle_prod_active_{prod_id}'))
+    
+    markup.add(
+        types.InlineKeyboardButton("✏️ تعديل الاسم", callback_data=f'edit_prod_name_{prod_id}'),
+        types.InlineKeyboardButton("💵 تعديل السعر", callback_data=f'edit_prod_price_{prod_id}')
+    )
+    markup.add(
+        types.InlineKeyboardButton("📝 تعديل الوصف", callback_data=f'edit_prod_desc_{prod_id}'),
+        types.InlineKeyboardButton("🔄 تبديل ID اللاعب", callback_data=f'toggle_prod_id_{prod_id}')
+    )
+    markup.add(types.InlineKeyboardButton("🗑️ حذف المنتج", callback_data=f'delete_prod_{prod_id}'))
+    # زر الرجوع يعود إلى قائمة المنتجات في نفس الفئة
+    markup.add(types.InlineKeyboardButton("🔙 رجوع للمنتجات", callback_data=f'manage_prods_in_cat_{cat_id}'))
+    
+    desc_text = desc if desc else "لا يوجد وصف"
+    status_text = "مفعل ✅" if is_active else "معطل ❌"
+    id_req_text = 'نعم' if req_id else 'لا'
 
+    text = (
+        f"🛍️ *إدارة المنتج: {name}*\n\n"
+        f"💰 *السعر:* {price} ل.س\n"
+        f"📄 *الوصف:* {desc_text}\n"
+        f"🎮 *معرف اللاعب مطلوب:* {id_req_text}\n"
+        f"🔄 *الحالة:* {status_text}"
+    )
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_prod_active_'))
+def toggle_product_active_status(call):
+    product_id = call.data.split('_')[-1]
+    
+    # عكس القيمة الحالية لـ is_active
+    safe_db_execute("UPDATE manual_products SET is_active = NOT is_active WHERE id=?", (product_id,))
+    
+    current_status = safe_db_execute("SELECT is_active FROM manual_products WHERE id=?", (product_id,))[0][0]
+    status_msg = "تم تفعيل المنتج" if current_status else "تم تعطيل المنتج"
+    bot.answer_callback_query(call.id, status_msg)
+    
+    # إعادة تحميل صفحة تعديل المنتج لعرض التغييرات
+    edit_manual_product(call)
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_prod_name_'))
 def edit_product_name(call):
     product_id = call.data.split('_')[3]
@@ -1378,17 +1432,17 @@ def handle_user_management(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_manual')
 def handle_manage_manual(call):
-    markup = types.InlineKeyboardMarkup()
-    markup.row(
-        types.InlineKeyboardButton('المنتجات', callback_data='manage_manual_products'),
-        types.InlineKeyboardButton('الفئات', callback_data='manage_manual_categories'),
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton('إدارة المنتجات', callback_data='manage_manual_products'),
+        types.InlineKeyboardButton('إدارة الفئات', callback_data='manage_manual_categories'),
     )
-    markup.row(
+    markup.add(
         types.InlineKeyboardButton('الطلبات', callback_data='manage_manual_orders'),
         types.InlineKeyboardButton('رجوع', callback_data='admin_panel')
     )
     bot.edit_message_text(
-        "إدارة المستخدمين:",
+        "إدارة العمليات اليدوية:",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=markup
@@ -1558,9 +1612,9 @@ def toggle_product_player_id(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('manual_cat_'))
 def show_manual_products(call):
-    # هذه الدالة يتم استدعاؤها بواسطة callback_query، لذا يمكنها تعديل رسالة البوت السابقة
     category_id = call.data.split('_')[2]
-    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? ORDER BY price ASC", (category_id,))
+    # تعديل: جلب المنتجات المفعلة فقط
+    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? AND is_active = TRUE ORDER BY price ASC", (category_id,))
 
     markup = types.InlineKeyboardMarkup()
     if not products:
@@ -1576,7 +1630,6 @@ def show_manual_products(call):
     
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_manual_categories'))
 
-    # هنا نستخدم edit_message_text لتعديل الرسالة التي تم النقر على زرها
     bot.edit_message_text(
         text,
         call.message.chat.id,
@@ -1584,41 +1637,62 @@ def show_manual_products(call):
         reply_markup=markup,
     )
     bot.answer_callback_query(call.id)
-
 # دالة جديدة لمعالجة الرجوع إلى قائمة الفئات اليدوية
 @bot.callback_query_handler(func=lambda call: call.data == 'back_to_manual_categories')
 def back_to_manual_categories(call):
-    categories = safe_db_execute("SELECT id, name FROM manual_categories")
+    categories = safe_db_execute("SELECT id, name FROM manual_categories WHERE is_active = TRUE")
     
-    markup = types.InlineKeyboardMarkup()
-    if categories: # تأكد من وجود فئات قبل إضافتها
-        for cat_id, cat_name in categories:
-            markup.add(types.InlineKeyboardButton(cat_name, callback_data=f'manual_cat_{cat_id}'))
-    
-    if is_admin(call.from_user.id): 
-        markup.add(types.InlineKeyboardButton("إدارة", callback_data='manage_manual'))
+    # تحديد عرض الصف ليكون 2
+    markup = types.InlineKeyboardMarkup(row_width=2)
 
-    # هنا نستخدم _send_or_edit_manual_categories لتعديل الرسالة السابقة
-    _send_or_edit_manual_categories(call.message.chat.id, call.message.message_id, markup, "اختر احد الفئات :")
-            
+    if categories:
+        # إنشاء قائمة أزرار الفئات
+        category_buttons = [
+            types.InlineKeyboardButton(cat_name, callback_data=f'manual_cat_{cat_id}') 
+            for cat_id, cat_name in categories
+        ]
+        # إضافة الأزرار دفعة واحدة
+        markup.add(*category_buttons)
+
+    bot.edit_message_text(
+        "اختر احد الفئات :",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('manual_prod_'))
 def show_manual_product_details(call):
     product_id = call.data.split('_')[2]
-    product_details = safe_db_execute("SELECT name, price, description, requires_player_id FROM manual_products WHERE id=?", (product_id,))
+    
+    # 1. جلب category_id مع تفاصيل المنتج
+    product_details = safe_db_execute("SELECT name, price, description, requires_player_id, category_id FROM manual_products WHERE id=?", (product_id,))
+    
     if not product_details:
         bot.send_message(call.message.chat.id, "⚠️ المنتج غير متوفر")
         return
-    name, price_usd, desc, requires_id = product_details[0]
+        
+    name, price_usd, desc, requires_id, category_id = product_details[0]
     price_syp = convert_to_syp(price_usd)
+    
     text = (
         f"🛍️ {name}\n"
         f"💵 السعر: {price_syp:,} ل.س\n"  
         f"📄 الوصف: {desc or 'لا يوجد وصف'}"
     )
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("شراء الآن", callback_data=f'buy_manual_{product_id}'))
+    
+    # 2. إنشاء لوحة المفاتيح
+    markup = types.InlineKeyboardMarkup(row_width=2) # عرض الصف 2
+    
+    # 3. إنشاء الأزرار
+    buy_button = types.InlineKeyboardButton("شراء الآن 🛒", callback_data=f'buy_manual_{product_id}')
+    # زر الرجوع سيعيد المستخدم إلى قائمة المنتجات الخاصة بنفس الفئة
+    back_button = types.InlineKeyboardButton("🔙 رجوع", callback_data=f'manual_cat_{category_id}')
+    
+    # 4. إضافة الأزرار إلى لوحة المفاتيح
+    markup.add(buy_button, back_button)
+    
     bot.edit_message_text(
         text,
         call.message.chat.id,
@@ -1797,6 +1871,7 @@ def confirm_new_freefire_purchase(call):
                     bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
             else:
                 bot.send_message(ADMIN_ID, admin_msg)
+            bot.send_message(call.message.chat.id, "⬇️ القائمة الرئيسية", reply_markup=main_menu(call.from_user.id))
         else:
             error_msg = response.json().get('message', 'فشلت العملية دون تفاصيل')
             raise Exception(error_msg)
@@ -1804,7 +1879,7 @@ def confirm_new_freefire_purchase(call):
     except Exception as e:
         print(f"Confirm Error: {str(e)}")
         bot.edit_message_text(
-            f"❌ حدث خطأ أثناء تنفيذ العملية! يرجى التواصل مع الدعم: {str(e)}",
+            f"❌ حدث خطأ أثناء تنفيذ العملية! يرجى التواصل مع الدعم ",
             call.message.chat.id,
             call.message.message_id
         )
@@ -1931,19 +2006,39 @@ def manage_products(message):
 def manage_manual_categories(call):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("➕ إضافة فئة جديدة", callback_data='add_manual_category'))
-    categories = safe_db_execute("SELECT id, name FROM manual_categories")
-    for cat_id, cat_name in categories:
-        markup.add(types.InlineKeyboardButton(
-            f"🗑️ حذف {cat_name}",
-            callback_data=f'delete_manual_cat_{cat_id}'
-        ))
-    markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data='manage_manual'))
+    
+    categories = safe_db_execute("SELECT id, name, is_active FROM manual_categories")
+    for cat_id, cat_name, is_active in categories:
+        status_icon = "✅" if is_active else "❌"
+        toggle_icon = "👁️ إخفاء" if is_active else "👁️‍🗨️ إظهار"
+        
+        row = [
+            types.InlineKeyboardButton(f"{status_icon} {cat_name}", callback_data=f'no_action_{cat_id}'), # زر لا يفعل شيء، للعرض فقط
+            types.InlineKeyboardButton(toggle_icon, callback_data=f'toggle_cat_vis_{cat_id}'),
+            types.InlineKeyboardButton("🗑️", callback_data=f'delete_manual_cat_{cat_id}')
+        ]
+        markup.row(*row)
+
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_manual'))
     bot.edit_message_text(
         "إدارة الفئات اليدوية:",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=markup
     )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_cat_vis_'))
+def toggle_category_visibility(call):
+    category_id = call.data.split('_')[-1]
+    
+
+    safe_db_execute("UPDATE manual_categories SET is_active = NOT is_active WHERE id=?", (category_id,))
+    
+    current_status = safe_db_execute("SELECT is_active FROM manual_categories WHERE id=?", (category_id,))[0][0]
+    status_msg = "تم إظهار الفئة" if current_status else "تم إخفاء الفئة"
+    bot.answer_callback_query(call.id, status_msg)
+
+    manage_manual_categories(call)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('topup_'))
 def handle_topup_selection(call):
@@ -2007,32 +2102,58 @@ def process_new_manual_category(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_manual_products')
 def manage_manual_products(call):
-    try:
-        timestamp = int(time.time())
-        products = safe_db_execute("SELECT id, name FROM manual_products ORDER BY name")
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("➕ إضافة منتج جديد", callback_data='add_manual_product'))
-        if products:
-            for prod_id, prod_name in products:
-                markup.add(types.InlineKeyboardButton(
-                    f"✏️ {prod_name}",
-                    callback_data=f'edit_manual_prod_{prod_id}'
-                ))
-        else:
-            markup.add(types.InlineKeyboardButton("⚠️ لا توجد منتجات", callback_data='no_products'))
-        markup.add(types.InlineKeyboardButton("رجوع 🔙", callback_data=f'manage_manual'))
-        bot.edit_message_text(
-            f"إدارة المنتجات اليدوية (آخر تحديث: {timestamp}):",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-    except Exception as e:
-        print(f"Error in manage_manual_products: {str(e)}")
-        try:
-            bot.answer_callback_query(call.id, "❌ حدث خطأ، يرجى المحاولة مرة أخرى")
-        except:
-            pass
+    categories = safe_db_execute("SELECT id, name FROM manual_categories ORDER BY name")
+    markup = types.InlineKeyboardMarkup()
+    if not categories:
+        markup.add(types.InlineKeyboardButton("⚠️ لا توجد فئات، أضف فئة أولاً", callback_data='manage_manual_categories'))
+    else:
+        for cat_id, cat_name in categories:
+            markup.add(types.InlineKeyboardButton(cat_name, callback_data=f'manage_prods_in_cat_{cat_id}'))
+    
+    markup.add(types.InlineKeyboardButton("➕ إضافة منتج جديد", callback_data='add_manual_product'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_manual'))
+
+    bot.edit_message_text(
+        "اختر فئة لعرض وإدارة منتجاتها:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+@bot.callback_query_handler(func=lambda call: call.data.startswith('manage_prods_in_cat_'))
+def manage_products_in_category(call):
+    category_id = call.data.split('_')[-1]
+    products = safe_db_execute("SELECT id, name, is_active FROM manual_products WHERE category_id=?", (category_id,))
+    category_name = safe_db_execute("SELECT name FROM manual_categories WHERE id=?", (category_id,))[0][0]
+    
+    markup = types.InlineKeyboardMarkup()
+    text = f"🛍️ منتجات فئة: *{category_name}*\n\n"
+
+    if not products:
+        text += "لا توجد منتجات في هذه الفئة."
+    else:
+        for prod_id, prod_name, is_active in products:
+            status_icon = "✅" if is_active else "❌"
+            markup.add(types.InlineKeyboardButton(
+                f"{status_icon} {prod_name}",
+                callback_data=f'edit_manual_prod_{prod_id}'
+            ))
+
+    markup.add(types.InlineKeyboardButton("➕ إضافة منتج لهذه الفئة", callback_data=f'add_prod_to_cat_{category_id}'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع لقائمة الفئات", callback_data='manage_manual_products'))
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('add_prod_to_cat_'))
+def add_product_to_category_handler(call):
+    category_id = call.data.split('_')[-1]
+    msg = bot.send_message(call.message.chat.id, "أرسل اسم المنتج الجديد:")
+    bot.register_next_step_handler(msg, process_product_name, category_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'add_manual_product')
 def add_manual_product(call):
@@ -3003,13 +3124,13 @@ def handle_topup_confirmation(call):
                     bot.send_message(ADMIN_ID, f"فشل إرسال إلى القناة:\n\n{admin_msg}")
             else:
                 bot.send_message(ADMIN_ID, admin_msg)
-
+            bot.send_message(call.message.chat.id, "⬇️ القائمة الرئيسية", reply_markup=main_menu(call.from_user.id))
         else:
             error_msg = purchase_response.json().get('message', 'فشلت العملية دون تفاصيل')
             raise Exception(error_msg)
 
     except Exception as e:
-        error_msg = f"❌ فشلت العملية: {str(e)}"
+        error_msg = f"❌ فشلت العملية "
         try:
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
@@ -3500,7 +3621,7 @@ def show_products(message, category_id):
                     f"{prod['title']} - {price_syp:,} ل.س", # تنسيق السعر
                     callback_data=f'product_{prod["id"]}'
                 ))
-        bot.send_message(message.chat.id, "المنتجات المتاحة (مرتبة من الأقل سعراً):", reply_markup=markup)
+        bot.send_message(message.chat.id, "المنتجات المتاحة حالياً :", reply_markup=markup)
 
 def process_balance_deduction(message):
     try:
@@ -3613,7 +3734,8 @@ def process_purchase_quantity(message, product_id):
                 f"✅ تمت العملية بنجاح!\nرقم الطلب: {order_details['order_id']}\n"
                 f"الأكواد:\n"
                 f"<code>{delivery_items}</code>",
-                parse_mode='HTML'
+                parse_mode='HTML',
+                reply_markup=main_menu(message.from_user.id)
             )
         else:
             error_msg = response.json().get('message', 'فشلت عملية الشراء')
