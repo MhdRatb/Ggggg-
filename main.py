@@ -7,6 +7,7 @@ import os
 import shutil
 import uuid
 import threading
+import html
 from telebot import types
 from datetime import datetime
 from threading import Lock
@@ -38,6 +39,8 @@ PUBG_OFFERS = []
 LAST_PUBG_UPDATE = None
 PUBG_UPDATE_INTERVAL = 900  # 15 دقيقة بالثواني
 PUBG_MANUAL_CATEGORY_ID = 20
+FREE_FIRE_MANUAL_CATEGORY_ID = 13
+
 
 # ================================
 # متغيرات جديدة لآلية التهدئة والقفل
@@ -386,7 +389,7 @@ def process_restore(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ فشل الاستعادة: {str(e)}")
     finally:
-        if os.path.exists(temp_name):
+        if 'temp_name' in locals() and os.path.exists(temp_name):
             os.remove(temp_name)
 
 # ============= وظائف المساعدة =============
@@ -416,7 +419,7 @@ def get_exchange_rate():
 
 def is_button_disabled(button_name):
     result = safe_db_execute("SELECT is_disabled FROM disabled_buttons WHERE button_name=?", (button_name,))
-    return result[0][0] if result else False
+    return result and result[0][0] == 1
 
 def log_user_order(user_id, order_type, product_id, product_name, price, player_id=None, api_response=None):
     try:
@@ -662,14 +665,24 @@ def notify_user_balance_update(user_id, amount, new_balance, admin_note=None):
     except Exception as e:
         print(f"فشل في إرسال الإشعار للمستخدم {user_id}: {str(e)}")
 
-def notify_admin(order_id, user_id, product_name, price, player_id=None, order_type=None):
+def notify_admin(order_id, user, product_name, price, player_id=None, order_type=None):
     try:
+        # --- بداية التعديل ---
+        
+        # 1. استخلاص بيانات المستخدم وإنشاء الرابط
+        user_id = user.id
+        user_name = html.escape(f"{user.first_name or ''} {user.last_name or ''}".strip())
+        user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
+        
+        # --- نهاية التعديل ---
+
         type_info = {
             'manual': {'icon': '🛍️', 'text': 'منتج يدوي'},
             'pubg': {'icon': '⚡', 'text': 'PUBG Mobile'},
             'freefire': {'icon': '🔥', 'text': 'Free Fire'},
             'freefire2': {'icon': '🔥', 'text': 'Free Fire 2'}
         }.get(order_type, {'icon': '📦', 'text': 'طلب عام'})
+        
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton(
@@ -685,18 +698,22 @@ def notify_admin(order_id, user_id, product_name, price, player_id=None, order_t
                 callback_data=f'reject_order_{order_id}'
             )
         )
+        
+        # 2. تحديث نص الرسالة لاستخدام الرابط الجديد
         admin_msg = (
             f"{type_info['icon']} طلب {type_info['text']} جديد\n\n"
             f"🆔 رقم الطلب: {order_id}\n"
-            f"👤 المستخدم: {user_id}\n"
+            f"👤 المستخدم: {user_link}\n" # تم استخدام الرابط هنا
             f"📦 المنتج: {product_name}\n"
             f"💵 المبلغ: {price} ل.س\n"
             f"{f'🎮 معرف اللاعب: {player_id}' if player_id else ''}"
         )
+        
         bot.send_message(
             ADMIN_ID, 
             admin_msg, 
-            reply_markup=markup
+            reply_markup=markup,
+            parse_mode='HTML' # 3. إضافة parse_mode للسماح بالروابط
         )
     except Exception as e:
         print(f"Error notifying admin: {str(e)}")
@@ -722,12 +739,18 @@ def main_menu(user_id):
         ('📞 الدعم', 'support')
     ]
     enabled_buttons = [btn[0] for btn in buttons if not is_button_disabled(btn[1])]
-    for i in range(0, len(enabled_buttons), 2):
-        row = enabled_buttons[i:i+2]
-        markup.row(*row)
+    
+    # التأكد من وجود أزرار مفعّلة قبل محاولة إنشاء صفوف
+    if enabled_buttons:
+        # إنشاء صفوف ثنائية للأزرار
+        rows = [enabled_buttons[i:i+2] for i in range(0, len(enabled_buttons), 2)]
+        for row in rows:
+            markup.row(*row)
+
     if is_admin(user_id):
         markup.row('لوحة التحكم ⚙️')
     return markup
+
 
 # ============= معالجة الأحداث =============
 @bot.message_handler(commands=['start'])
@@ -812,53 +835,78 @@ def free_fire_main_menu(message):
         resize_keyboard=True,
         is_persistent=True
     )
-    markup.row('🔥 Free Fire 1', '🔥 Free Fire 2')
+    
+    ff_buttons = []
+    # التحقق من أن الأزرار الفرعية ليست معطلة
+    if not is_button_disabled('freefire_1'):
+        ff_buttons.append('🔥 Free Fire 1')
+    if not is_button_disabled('freefire_2'):
+        ff_buttons.append('🔥 Free Fire 2')
+    
+    if ff_buttons:
+        markup.row(*ff_buttons)
+
+    # إضافة زر الشحن اليدوي الجديد لفري فاير
+    if not is_button_disabled('freefire_manual'):
+        markup.row('شحن يدوي (فري فاير) 👨🏻‍💻')
+
     markup.row('🔙 الرجوع للقائمة الرئيسية')
+    
     try:
         bot.send_message(
             message.chat.id,
-            f"إختر احد السيرفرات :\n"
-            f"تعمل هذه السيرفرات الساعة 7 مساءً\n"
-            f"السيرفر الاول لا يمكن استخدامه إلا الساعة 7 \n"
-            f"أما الثاني يمكنك استخدامه متى شئت ولكن لن يتم تسليم الطلب قبل الساعة 7",
+            f"اختر أحد السيرفرات أو نوع الشحن:",
             reply_markup=markup
         )
     except Exception as e:
         print(f"Error sending message: {str(e)}")
         bot.send_message(
             message.chat.id,
-            f"إختر احد السيرفرات :\n",
+            f"اختر أحد السيرفرات أو نوع الشحن:",
             reply_markup=markup
         )
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'clean_pending_recharges' and is_admin(call.from_user.id))
 def clean_pending_recharges(call):
     try:
-        affected = safe_db_execute("""
-            UPDATE recharge_requests 
-            SET status = 'failed' 
-            WHERE status = 'pending' OR status = 'pending_admin'
-        """)[0][0]
+        # We need to get the number of affected rows.
+        # For UPDATE, a cursor's rowcount is what we need.
+        # Let's adjust safe_db_execute to return this.
+        # A quick fix for now is to just commit.
+        with db_lock:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE recharge_requests 
+                SET status = 'failed' 
+                WHERE status = 'pending' OR status = 'pending_admin'
+            """)
+            affected = cursor.rowcount
+            conn.commit()
+            cursor.close()
+        
         bot.answer_callback_query(call.id, f"✅ تم تنظيف {affected} طلب معلق")
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ حدث خطأ: {str(e)}")
 
+
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_buttons' and is_admin(call.from_user.id))
 def handle_manage_buttons(call):
     buttons = [
-        ('PUBG Mobile', 'pubg'),
-        ('Free Fire', 'freefire'),
+        ('PUBG MOBILE ⚡', 'pubg'),
+        ('FREE FIRE 🔥', 'freefire'),
         ('أكواد وبطاقات', 'cards'),
-        ('المنتجات اليدوية', 'manual'),
-        ('طلباتي', 'orders'),
-        ('رصيدي', 'balance')
+        ('🛍️ المنتجات اليدوية', 'manual'),
+        ('طلباتي 🗂️', 'orders'),
+        ('رصيدي 💰', 'balance')
     ]
     markup = types.InlineKeyboardMarkup()
     for name, key in buttons:
         status = "❌" if is_button_disabled(key) else "✅"
+        # إضافة 'main' لتمييز مصدر الطلب
         markup.add(types.InlineKeyboardButton(
             f"{status} {name}",
-            callback_data=f'toggle_button_{key}'
+            callback_data=f'toggle_button_main_{key}'
         ))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
     bot.edit_message_text(
@@ -868,16 +916,52 @@ def handle_manage_buttons(call):
         reply_markup=markup
     )
 
+# دالة جديدة لإدارة الأزرار الفرعية (داخل الخدمات)
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_sub_buttons' and is_admin(call.from_user.id))
+def handle_manage_sub_buttons(call):
+    sub_buttons = [
+        ('Auto ⚡ (PUBG)', 'pubg_auto'),
+        ('شحن يدوي (ببجي) 👨🏻‍💻', 'pubg_manual'),
+        ('🔥 Free Fire 1', 'freefire_1'),
+        ('🔥 Free Fire 2', 'freefire_2'),
+        ('شحن يدوي (فري فاير) 👨🏻‍💻', 'freefire_manual')
+    ]
+    markup = types.InlineKeyboardMarkup()
+    for name, key in sub_buttons:
+        status = "❌" if is_button_disabled(key) else "✅"
+        # إضافة 'sub' لتمييز مصدر الطلب
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {name}",
+            callback_data=f'toggle_button_sub_{key}'
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
+    bot.edit_message_text(
+        "إدارة أزرار الخدمات (PUBG & Free Fire):",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_button_') and is_admin(call.from_user.id))
 def handle_toggle_button(call):
-    button_key = call.data.split('_')[2]
+    parts = call.data.split('_')
+    menu_type = parts[2]
+    button_key = '_'.join(parts[3:]) # للتعامل مع أسماء أزرار قد تحتوي على '_'
+
     current_status = is_button_disabled(button_key)
     safe_db_execute(
         "INSERT OR REPLACE INTO disabled_buttons (button_name, is_disabled) VALUES (?, ?)",
         (button_key, not current_status)
     )
     bot.answer_callback_query(call.id, f"تم {'تعطيل' if not current_status else 'تفعيل'} الزر")
-    handle_manage_buttons(call)
+    
+    # إعادة التوجيه إلى القائمة الصحيحة
+    if menu_type == 'main':
+        handle_manage_buttons(call)
+    elif menu_type == 'sub':
+        handle_manage_sub_buttons(call)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_channel' and is_admin(call.from_user.id))
 def handle_manage_channel(call):
@@ -1103,7 +1187,7 @@ def process_freefire2_purchase(message, product):
             f"🛒 تأكيد عملية الشراء:\n\n"
             f"📌 العرض: {product['offerName']}\n"
             f"💰 السعر: {price_syp:,} ل.س\n"
-            f"👤 ID اللاعب: {player_id}\n\n"
+            f"👤 آيدي اللاعب: {player_id}\n\n"
             f"هل أنت متأكد من المعلومات أعلاه؟",
             reply_markup=markup
         )
@@ -1225,6 +1309,7 @@ def confirm_freefire2_purchase(call):
         user_processing_lock[user_id] = False # تحرير القفل
 
 #============== free fire 2 end ====================
+
 @bot.message_handler(func=lambda msg: msg.text == 'أكواد وبطاقات' and not is_button_disabled('cards'))
 def show_categories_handler(message):
     if is_bot_paused() and not is_admin(message.from_user.id):
@@ -1776,7 +1861,7 @@ def process_new_freefire_purchase(message, product):
             f"🛒 تأكيد عملية الشراء:\n\n"
             f"📌 العرض: {product['name']}\n"
             f"💰 السعر: {price_syp:,} ل.س\n"
-            f"👤 ID اللاعب: {player_id}\n\n"
+            f"👤 آيدي اللاعب: {player_id}\n\n"
             f"هل أنت متأكد من المعلومات أعلاه؟",
             reply_markup=markup
         )
@@ -1933,15 +2018,43 @@ def handle_api_error(call, error_msg, price_syp=None):
 @bot.message_handler(func=lambda msg: msg.text == 'PUBG MOBILE ⚡'and not is_button_disabled('pubg'))
 def pubg_main_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
-    markup.row('Auto ⚡', 'يدوي 👨🏻‍💻')
+    row_buttons = []
+    # التحقق من أن الأزرار الفرعية ليست معطلة
+    if not is_button_disabled('pubg_auto'):
+        row_buttons.append('Auto ⚡')
+    if not is_button_disabled('pubg_manual'):
+        # تغيير اسم الزر لتمييزه
+        row_buttons.append('شحن يدوي (ببجي) 👨🏻‍💻')
+
+    if row_buttons:
+        markup.row(*row_buttons)
+
     markup.row('🔙 الرجوع للقائمة الرئيسية')
     bot.send_message(message.chat.id, "يرجى اختيار نوع الشحن:", reply_markup=markup)
 
-@bot.message_handler(func=lambda msg: msg.text == 'يدوي 👨🏻‍💻' and not is_button_disabled('pubg'))
+@bot.message_handler(func=lambda msg: msg.text == 'شحن يدوي (ببجي) 👨🏻‍💻' and not is_button_disabled('pubg'))
 def show_pubg_manual_products(message):
-    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? ORDER BY price ASC", (PUBG_MANUAL_CATEGORY_ID,))
+    # إصلاح: إضافة شرط للتحقق من أن المنتج مفعل (is_active)
+    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? AND is_active = TRUE ORDER BY price ASC", (PUBG_MANUAL_CATEGORY_ID,))
     if not products:
-        bot.send_message(message.chat.id, "⚠️ لا توجد منتجات PUBG يدوية حالياً")
+        bot.send_message(message.chat.id, "⚠️ لا توجد منتجات PUBG يدوية متاحة حالياً")
+        return
+    markup = types.InlineKeyboardMarkup()
+    for prod_id, name, price in products:
+        syp_price = convert_to_syp(price)
+        markup.add(types.InlineKeyboardButton(f"{name} - {syp_price:,} ل.س", callback_data=f'manual_prod_{prod_id}'))
+    bot.send_message(message.chat.id,
+                    f"تستغرق عملية المعالجة من 10 دقائق الى نصف ساعة \n"
+                    f"اختر المنتج الذي تريده:\n",
+                    reply_markup=markup)
+
+# إضافة دالة جديدة لعرض منتجات فري فاير اليدوية
+@bot.message_handler(func=lambda msg: msg.text == 'شحن يدوي (فري فاير) 👨🏻‍💻' and not is_button_disabled('freefire'))
+def show_freefire_manual_products(message):
+    # استخدام ID الفئة اليدوية الخاص بـ Free Fire
+    products = safe_db_execute("SELECT id, name, price FROM manual_products WHERE category_id=? AND is_active = TRUE ORDER BY price ASC", (FREE_FIRE_MANUAL_CATEGORY_ID,))
+    if not products:
+        bot.send_message(message.chat.id, "⚠️ لا توجد منتجات Free Fire يدوية متاحة حالياً")
         return
     markup = types.InlineKeyboardMarkup()
     for prod_id, name, price in products:
@@ -2598,7 +2711,7 @@ def process_player_id_for_manual_purchase(message, product_id, price_usd, user_i
         f"🛒 تأكيد عملية الشراء اليدوية:\n\n"
         f"📌 المنتج: {product_name}\n"
         f"💰 السعر: {price_syp:,} ل.س\n"
-        f"👤 ID اللاعب: {player_id}\n\n"
+        f"👤 آيدي اللاعب: {player_id}\n\n"
         f"هل أنت متأكد من المعلومات أعلاه؟",
         reply_markup=markup
     )
@@ -2702,7 +2815,7 @@ def confirm_manual_purchase(call):
         )
 
         send_order_confirmation(user_id, order_id, product_name, price_syp, player_id)
-        notify_admin(order_id, user_id, product_name, price_syp, player_id, order_type='manual')
+        notify_admin(order_id, call.from_user, product_name, price_syp, player_id, order_type='manual')
 
     except ValueError as ve:
         error_message = f"❌ فشلت عملية الشراء: {str(ve)}"
@@ -3670,22 +3783,6 @@ def show_categories(message):
                 markup.add(types.InlineKeyboardButton(cat['title'], callback_data=f'category_{cat["id"]}'))
         bot.send_message(message.chat.id, "اختر فئة:", reply_markup=markup)
 
-# هذه الدالة مكررة، تم ترك واحدة فقط
-# def show_products(message, category_id):
-#     response = requests.get(f"{BASE_URL}category/{category_id}")
-#     if response.status_code == 200:
-#         products = response.json().get('products', [])
-#         products = sorted(products, key=lambda x: convert_to_syp(x['unit_price']))
-#         markup = types.InlineKeyboardMarkup()
-#         for prod in products:
-#             if prod['stock'] > 0:
-#                 price_syp = convert_to_syp(prod['unit_price'])
-#                 markup.add(types.InlineKeyboardButton(
-#                     f"{prod['title']} - {price_syp} ل.س",
-#                     callback_data=f'product_{prod["id"]}'
-#                 ))
-#         bot.send_message(message.chat.id, "المنتجات المتاحة:", reply_markup=markup)
-
 def process_purchase_quantity(message, product_id):
     user_id = message.from_user.id
     if user_processing_lock.get(user_id, False):
@@ -3759,17 +3856,6 @@ def show_product_details(message, product_id):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("شراء 🛒", callback_data=f"buy_{product['id']}"))
         bot.send_message(message.chat.id, text, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data == 'backup_db')
-def backup_database(call):
-    try:
-        backup_time = datetime.now().strftime("%Y%m%d%H%M%S")
-        backup_name = f"backup_{backup_time}.db"
-        with open('wallet.db', 'rb') as f:
-            bot.send_document(ADMIN_ID, f, caption=f"Backup {backup_time}")
-        bot.answer_callback_query(call.id, "✅ تم إنشاء النسخة الاحتياطية")
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ خطأ: {str(e)}")
 
 def process_recharge_code_update(message):
     try:
@@ -3953,7 +4039,7 @@ def process_recharge_amount(message):
             reply_markup=main_menu(message.from_user.id)
         )
 
-def notify_admin_recharge_request(user_id, request_id, amount, proof_type, proof_content, code):
+def notify_admin_recharge_request(user, request_id, amount, proof_type, proof_content, code):
     try:
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -3961,28 +4047,42 @@ def notify_admin_recharge_request(user_id, request_id, amount, proof_type, proof
             types.InlineKeyboardButton("❌ الرفض", callback_data=f"reject_recharge_{request_id}")
         )
 
+        # --- بداية التعديل ---
+        
+        # 1. بناء اسم المستخدم ورابط ملفه الشخصي
+        user_id = user.id
+        # استخدام html.escape لتجنب الأخطاء في الأسماء التي تحتوي رموزاً
+        user_name = html.escape(f"{user.first_name or ''} {user.last_name or ''}".strip())
+        user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
+
+        # 2. تحديث نص الرسالة ليشمل الرابط
         admin_msg = (
             f"🔄 طلب تعبئة رصيد جديد\n\n"        
-            f"👤 آيدي المستخدم: {user_id}\n"
+            f"👤 المستخدم: {user_link}\n" # تم استبدال الآيدي بالرابط
             f"💰 المبلغ: {amount:,} ل.س\n"
             f"🔢 كود الشحن: {code}\n"
             f"📝 نوع الإثبات: {proof_type}\n"
             f"🆔 رقم الطلب: {request_id}\n"
         )
+        
+        # --- نهاية التعديل ---
+
         if proof_type == "صورة":
             admin_msg += "🖼️ تم إرسال صورة الإشعار"
             bot.send_photo(
                 ADMIN_ID,
                 proof_content,
                 caption=admin_msg,
-                reply_markup=markup
+                reply_markup=markup,
+                parse_mode='HTML'  # 3. إضافة parse_mode للسماح بالروابط
             )
         else:
             admin_msg += f"🔢 رقم العملية: {proof_content}"
             bot.send_message(
                 ADMIN_ID,
                 admin_msg,
-                reply_markup=markup
+                reply_markup=markup,
+                parse_mode='HTML'  # 3. إضافة parse_mode للسماح بالروابط
             )
     except Exception as e:
         print(f"Error in notify_admin_recharge_request: {str(e)}")
@@ -4039,7 +4139,7 @@ def process_recharge_proof(message, request_id, code_id, amount):
         code_info = safe_db_execute('SELECT code FROM recharge_codes WHERE id=?', (code_id,))
         if code_info:
             code = code_info[0][0]
-            notify_admin_recharge_request(message.from_user.id, request_id, amount, proof_type, proof_content, code)
+            notify_admin_recharge_request(message.from_user, request_id, amount, proof_type, proof_content, code)
         else:
             raise Exception("كود الشحن غير موجود")
         
@@ -4151,7 +4251,7 @@ def process_topup_purchase(message, offer):
             f"🛒 تأكيد عملية الشراء:\n\n"
             f"📌 العرض: {offer['title']}\n"
             f"💰 السعر: {price_syp:,} ل.س\n"
-            f"👤 ID اللاعب: {player_id}\n\n"
+            f"👤 آيدي اللاعب: {player_id}\n\n"
             f"هل أنت متأكد من المعلومات أعلاه؟"
         )
         bot.send_message(
@@ -4202,7 +4302,11 @@ def show_admin_panel(message):
     markup = types.InlineKeyboardMarkup()
     markup.row(
         types.InlineKeyboardButton('تعديل سعر الصرف', callback_data='edit_exchange_rate'),
-        types.InlineKeyboardButton("إدارة الأزرار", callback_data='manage_buttons')
+        types.InlineKeyboardButton("إدارة الأزرار الرئيسية", callback_data='manage_buttons') # تم تعديل الاسم للتمييز
+    )
+    # زر جديد لإدارة الأزرار الفرعية
+    markup.row(
+        types.InlineKeyboardButton("إدارة أزرار الخدمات", callback_data='manage_sub_buttons')
     )
     markup.row(
         types.InlineKeyboardButton('إدارة المستخدمين', callback_data='user_management'),
@@ -4224,6 +4328,7 @@ def show_admin_panel(message):
         types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot')
     )
     bot.send_message(message.chat.id, "⚙️ لوحة التحكم الإدارية:", reply_markup=markup)
+
 
 # ============= تشغيل البوت =============
 if __name__ == '__main__':
