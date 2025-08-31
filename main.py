@@ -1415,8 +1415,17 @@ def process_recharge_proof(message, request_id, address_id, amount_syp):
 # 5. إشعار الأدمن
 def notify_admin_recharge_request(user, request_id, amount_syp, proof_type, proof_content, address_id):
     try:
-        address_info = safe_db_execute("SELECT p_addr.address, p_meth.name FROM payment_addresses p_addr JOIN payment_methods p_meth ON p_addr.method_id = p_meth.id WHERE p_addr.id=?", (address_id,))[0]
-        address, method_name = address_info
+        # 1. جلب كل المعلومات اللازمة عن العنوان وطريقة الدفع
+        query = """
+        SELECT 
+            pa.address, pa.currency, pa.exchange_rate, 
+            pm.name, pm.type 
+        FROM payment_addresses pa
+        JOIN payment_methods pm ON pa.method_id = pm.id
+        WHERE pa.id = ?
+        """
+        address_info = safe_db_execute(query, (address_id,))[0]
+        address, currency, rate, method_name, method_type = address_info
 
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -1426,12 +1435,26 @@ def notify_admin_recharge_request(user, request_id, amount_syp, proof_type, proo
         user_name = html.escape(f"{user.first_name or ''} {user.last_name or ''}".strip())
         user_link = f'<a href="tg://user?id={user.id}">{user_name}</a>'
 
+        # 2. بناء نص الرسالة بناءً على نوع طريقة الدفع
         admin_msg = (
             f"🔄 طلب شحن جديد #{request_id}\n\n"
             f"👤 المستخدم: {user_link}\n"
-            f"💰 المبلغ: {amount_syp:,} ل.س\n"
-            f"💳 الطريقة: {method_name}\n"
-            f"📍 العنوان: `{address}`\n"
+        )
+        
+        # === المنطق الجديد هنا ===
+        # إذا كانت الطريقة بعملة أجنبية ولها سعر صرف، قم بحساب وعرض المبلغين
+        if method_type == 'foreign_currency' and rate and rate > 0:
+            foreign_amount = round(amount_syp / rate, 4)
+            admin_msg += f"💰 المبلغ بالليرة: {amount_syp:,} ل.س\n"
+            admin_msg += f"💱 المبلغ بالعملة: {foreign_amount} {currency}\n"
+        else:
+            # للطرق العادية، اعرض المبلغ بالليرة فقط
+            admin_msg += f"💰 المبلغ: {amount_syp:,} ل.س\n\n"
+        # =======================
+
+        admin_msg += (
+            f"💳 الطريقة: {method_name}\n\n"
+            f"📍 العنوان المستلم: {address}\n\n"
         )
         
         if proof_type == "صورة":
@@ -1443,7 +1466,7 @@ def notify_admin_recharge_request(user, request_id, amount_syp, proof_type, proo
                 parse_mode='HTML'
             )
         else: # رقم العملية
-            admin_msg += f"🔢 رقم العملية: `{proof_content}`"
+            admin_msg += f"🔢 رقم العملية: {proof_content}"
             bot.send_message(
                 ADMIN_ID,
                 admin_msg,
@@ -2024,8 +2047,9 @@ def delete_product_handler(call):
         bot.answer_callback_query(call.id, "❌ حدث خطأ في معالجة الطلب")
         print(f"Error in delete_product_handler: {str(e)}")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_delete_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_delete_') and not call.data.startswith('confirm_delete_method_'))
 def confirm_delete_product(call):
+
     try:
         product_id = call.data.split('_')[2]
         safe_db_execute("DELETE FROM manual_products WHERE id=?", (product_id,))
@@ -2839,8 +2863,8 @@ def handle_recharge_decision(call):
             return
 
         if action == 'approve':
+            # ... (الكود الخاص بتحديث الرصيد يبقى كما هو) ...
             update_balance(user_id, amount)
-            # تحديث المبلغ المستخدم للعنوان إذا كان له حد يومي
             safe_db_execute('''
                 UPDATE payment_addresses 
                 SET daily_used = daily_used + ? 
@@ -2853,8 +2877,38 @@ def handle_recharge_decision(call):
                 f"🎉 تمت الموافقة على طلب الشحن!\n\n💰 تم إضافة {amount:,} ل.س إلى رصيدك."
             )
             bot.answer_callback_query(call.id, "✅ تمت الموافقة بنجاح.")
+
+            # ================== تعديل الإشعار هنا ==================
+            channel_id = get_notification_channel()
+            if channel_id:
+                try:
+                    admin_username = call.from_user.username or "غير معروف"
+                    # الرابط يستخدم ID المستخدم كنص قابل للنقر
+                    user_link = f'<a href="tg://user?id={user_id}">{user_id}</a>'
+                    
+                    address_info_query = safe_db_execute(
+                        "SELECT pa.address, pm.name FROM payment_addresses pa JOIN payment_methods pm ON pa.method_id = pm.id WHERE pa.id=?",
+                        (address_id,)
+                    )
+                    address, method_name = address_info_query[0] if address_info_query else ("غير معروف", "غير معروفة")
+
+                    # تم توحيد كل التنسيقات لاستخدام HTML
+                    channel_message = (
+                        f"✅ <b>عملية تعبئة مكتملة</b>\n\n"
+                        f"👤 <b>المستخدم:</b> {user_link}\n"
+                        f"💰 <b>المبلغ:</b> {amount:,} ل.س\n"
+                        f"💳 <b>الطريقة:</b> {method_name}\n"
+                        f"📍 <b>إلى العنوان:</b> <code>{html.escape(str(address))}</code>\n\n"
+                        f"👨‍💼 تمت الموافقة بواسطة: @{admin_username}"
+                    )
+
+                    bot.send_message(channel_id, channel_message, parse_mode='HTML')
+                except Exception as e:
+                    print(f"Failed to send recharge completion notification to channel: {e}")
+            # ==========================================================
         
         else: # action == 'reject'
+            # ... (كود الرفض يبقى كما هو) ...
             safe_db_execute("UPDATE recharge_requests SET status = 'rejected' WHERE id = ?", (request_id,))
             bot.send_message(
                 user_id,
@@ -2863,7 +2917,7 @@ def handle_recharge_decision(call):
             )
             bot.answer_callback_query(call.id, "❌ تم رفض الطلب.")
 
-        # تحديث رسالة الأدمن
+        # ... (باقي كود تحديث رسالة الأدمن يبقى كما هو) ...
         new_status_text = '✅ تمت الموافقة' if action == 'approve' else '❌ تم الرفض'
         new_text = f"{call.message.caption or call.message.text}\n\n---\nتمت المعالجة بواسطة: @{call.from_user.username}\nالحالة: {new_status_text}"
         
@@ -3204,32 +3258,6 @@ def delete_manual_category(call):
     safe_db_execute("DELETE FROM manual_categories WHERE id=?", (category_id,))
     bot.send_message(call.message.chat.id, "✅ تم حذف الفئة بنجاح")
     manage_manual_categories(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == 'delete_manual_product')
-def delete_manual_product_menu(call):
-    products = safe_db_execute("SELECT id, name FROM manual_products")
-    if not products:
-        bot.send_message(call.message.chat.id, "⚠️ لا توجد منتجات متاحة للحذف")
-        return
-    markup = types.InlineKeyboardMarkup()
-    for prod_id, prod_name in products:
-        markup.add(types.InlineKeyboardButton(
-            f"🗑️ {prod_name}",
-            callback_data=f'delete_manual_prod_{prod_id}'
-        ))
-    bot.edit_message_text(
-        "اختر المنتج للحذف:",
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_manual_prod_'))
-def delete_manual_product(call):
-    product_id = call.data.split('_')[3]
-    safe_db_execute("DELETE FROM manual_products WHERE id=?", (product_id,))
-    bot.send_message(call.message.chat.id, "✅ تم حذف المنتج بنجاح")
-    manage_manual_products(call)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_manual_orders')
 def manage_manual_orders(call):
@@ -3719,25 +3747,38 @@ def process_order_search(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_payment_methods' and is_admin(call.from_user.id))
 def handle_manage_payment_methods(call):
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    # لا نحدد عرض الصف هنا، سنتحكم به يدويًا
+    markup = types.InlineKeyboardMarkup()
     methods = safe_db_execute("SELECT id, name, type, is_active FROM payment_methods ORDER BY id")
     
+    # === منطق جديد لتجميع الأزرار في صفوف ثنائية ===
+    method_buttons = []
     for method_id, name, method_type, is_active in methods:
         status_icon = "✅" if is_active else "⏸️"
-        markup.add(types.InlineKeyboardButton(
-            f"{status_icon} {name}",
+        # تقصير النص قليلًا ليناسب الصفوف الثنائية بشكل أفضل
+        button_text = f"{status_icon} {name}"
+        button = types.InlineKeyboardButton(
+            button_text,
             callback_data=f'view_method_{method_id}'
-        ))
-    
-    markup.add(types.InlineKeyboardButton("➕ إضافة طريقة دفع جديدة", callback_data='add_payment_method'))
-    recharge_disabled = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")[0][0] == '1'
-    toggle_text = "▶️ تفعيل خدمة الشحن" if recharge_disabled else "⏸️ تعطيل خدمة الشحن"
-    markup.add(types.InlineKeyboardButton(toggle_text, callback_data='toggle_recharge_service'))
-    
-    # ================== الزر الجديد ==================
-    markup.add(types.InlineKeyboardButton("🧹 تنظيف طلبات الشحن المعلقة", callback_data='clean_pending_recharges'))
+        )
+        method_buttons.append(button)
+
+    # إضافة أزرار طرق الدفع إلى الـ markup، زرين في كل صف
+    for i in range(0, len(method_buttons), 2):
+        markup.row(*method_buttons[i:i+2])
     # ===============================================
 
+    # إضافة الأزرار الأخرى
+    recharge_disabled = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")[0][0] == '1'
+    toggle_text = "▶️ تفعيل خدمة الشحن" if recharge_disabled else "⏸️ تعطيل خدمة الشحن"
+    
+    # يمكن وضع الأزرار الأخرى أيضًا في صف واحد إذا كان مناسبًا
+    markup.row(
+        types.InlineKeyboardButton(toggle_text, callback_data='toggle_recharge_service'),
+        types.InlineKeyboardButton("🧹 تنظيف الطلبات", callback_data='clean_pending_recharges')
+    )
+    
+    markup.add(types.InlineKeyboardButton("➕ إضافة طريقة دفع جديدة", callback_data='add_payment_method'))
     markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data='admin_panel'))
     
     bot.edit_message_text(
@@ -3746,7 +3787,6 @@ def handle_manage_payment_methods(call):
         call.message.message_id,
         reply_markup=markup
     )
-
 @bot.callback_query_handler(func=lambda call: call.data == 'clean_pending_recharges' and is_admin(call.from_user.id))
 def clean_pending_recharges_handler(call):
     try:
@@ -3800,20 +3840,26 @@ def process_add_method_name(message, method_type):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_method_') and is_admin(call.from_user.id))
 def view_specific_method(call):
     method_id = int(call.data.split('_')[2])
-    method = safe_db_execute("SELECT name, is_active, min_amount FROM payment_methods WHERE id=?", (method_id,))[0]
-    name, is_active, min_amount = method
+    method = safe_db_execute("SELECT name, is_active, min_amount FROM payment_methods WHERE id=?", (method_id,))
+    if not method:
+        bot.answer_callback_query(call.id, "تم حذف هذه الطريقة.", show_alert=True)
+        handle_manage_payment_methods(call)
+        return
+        
+    name, is_active, min_amount = method[0]
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     toggle_text = "❌ تعطيل" if is_active else "✅ تفعيل"
     
     markup.add(
-        types.InlineKeyboardButton("➕ إضافة عنوان/رقم جديد", callback_data=f'add_address_{method_id}'),
+        types.InlineKeyboardButton("➕ إضافة عنوان/رقم", callback_data=f'add_address_{method_id}'),
         types.InlineKeyboardButton(f"{toggle_text} الطريقة", callback_data=f'toggle_method_{method_id}')
     )
-    
-    # ================== الزر الجديد ==================
     markup.add(types.InlineKeyboardButton(f"💰 تحديد الحد الأدنى ({min_amount or 0} ل.س)", callback_data=f'edit_min_amount_{method_id}'))
-    # ===============================================
+    
+    # ================== زر الحذف الجديد ==================
+    markup.add(types.InlineKeyboardButton(f"🗑️ حذف طريقة الدفع", callback_data=f'confirm_delete_method_{method_id}'))
+    # ==================================================
 
     addresses = safe_db_execute("SELECT id, address, is_active FROM payment_addresses WHERE method_id=?", (method_id,))
     if addresses:
@@ -3827,6 +3873,61 @@ def view_specific_method(call):
     
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_payment_methods'))
     bot.edit_message_text(f"إدارة: {name}", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_delete_method_') and is_admin(call.from_user.id))
+def confirm_delete_method(call):
+    try:
+        method_id = int(call.data.split('_')[3])
+        method_name_query = safe_db_execute("SELECT name FROM payment_methods WHERE id=?", (method_id,))
+        if not method_name_query:
+            bot.answer_callback_query(call.id, "⚠️ هذه الطريقة تم حذفها بالفعل.")
+            handle_manage_payment_methods(call)
+            return
+
+        method_name = method_name_query[0][0]
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ نعم، احذف", callback_data=f'execute_delete_method_{method_id}'),
+            types.InlineKeyboardButton("❌ إلغاء", callback_data=f'view_method_{method_id}')
+        )
+        
+        warning_text = (
+            f"⚠️ <b>تحذير!</b>\n"
+            f"هل أنت متأكد من حذف طريقة الدفع '{method_name}'؟\n\n"
+            f"سيتم حذف جميع العناوين والأرقام المرتبطة بها بشكل نهائي."
+        )
+        bot.edit_message_text(
+            warning_text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Error in confirm_delete_method: {e}")
+        bot.answer_callback_query(call.id, "❌ حدث خطأ.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('execute_delete_method_') and is_admin(call.from_user.id))
+def execute_delete_method(call):
+    # رسالة للطرفية (الكونسول) للتأكد من أن هذه الدالة هي التي تعمل
+    print(f"DEBUG: تم استدعاء دالة execute_delete_method الصحيحة للمعرف {call.data}")
+    try:
+        method_id = int(call.data.split('_')[3])
+        
+        # الأمر الصحيح لحذف طريقة الدفع من جدولها المخصص
+        safe_db_execute("DELETE FROM payment_methods WHERE id=?", (method_id,))
+        
+        # رسالة التأكيد الصامتة الصحيحة
+        bot.answer_callback_query(call.id, "🗑️ تم حذف طريقة الدفع بنجاح.")
+        
+        # العودة إلى القائمة الرئيسية لطرق الدفع وتحديثها
+        handle_manage_payment_methods(call)
+    except Exception as e:
+        print(f"Error in execute_delete_method: {e}")
+        bot.answer_callback_query(call.id, "❌ فشل الحذف.")
+        
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_min_amount_') and is_admin(call.from_user.id))
 def edit_method_min_amount(call):
     method_id = int(call.data.split('_')[3])
