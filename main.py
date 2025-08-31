@@ -1250,6 +1250,29 @@ def process_foreign_currency_amount(message, address_id):
         if amount_syp <= 0:
             raise ValueError("المبلغ يجب أن يكون أكبر من صفر")
 
+        # ================== إضافة جديدة للتحقق من الحد الأدنى ==================
+        # 1. نحصل على method_id من address_id
+        method_id_query = safe_db_execute("SELECT method_id FROM payment_addresses WHERE id=?", (address_id,))
+        if not method_id_query:
+            bot.send_message(message.chat.id, "❌ خطأ: لم يتم العثور على طريقة الدفع.")
+            return
+        method_id = method_id_query[0][0]
+
+        # 2. نحصل على الحد الأدنى من طريقة الدفع
+        min_amount_query = safe_db_execute("SELECT min_amount FROM payment_methods WHERE id=?", (method_id,))
+        min_amount = min_amount_query[0][0] if min_amount_query else 0
+
+        # 3. نقارن المبلغ بالحد الأدنى
+        if min_amount and amount_syp < min_amount:
+            bot.send_message(message.chat.id, f"❌ المبلغ الذي أدخلته أقل من الحد الأدنى المسموح به لهذه الطريقة وهو: {min_amount:,} ل.س")
+            # نطلب من المستخدم إدخال المبلغ مرة أخرى
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add('❌ إلغاء العملية')
+            msg = bot.send_message(message.chat.id, "يرجى إدخال مبلغ صحيح بالليرة السورية:", reply_markup=markup)
+            bot.register_next_step_handler(msg, process_foreign_currency_amount, address_id)
+            return # نوقف تنفيذ الدالة هنا
+        # ===================================================================
+
         address_info = safe_db_execute(
             "SELECT address, currency, exchange_rate FROM payment_addresses WHERE id=?",
             (address_id,)
@@ -1257,7 +1280,7 @@ def process_foreign_currency_amount(message, address_id):
         address, currency, rate = address_info
 
         # **هنا يتم حساب المبلغ بالعملة الأجنبية**
-        foreign_amount = round(amount_syp / rate, 4) # تقريب لأربع خانات عشرية
+        foreign_amount = round(amount_syp / rate, 4)
 
         # إنشاء طلب مبدئي
         safe_db_execute(
@@ -1269,7 +1292,7 @@ def process_foreign_currency_amount(message, address_id):
         # عرض التعليمات النهائية للمستخدم
         final_instructions = (
             f"لإضافة `{amount_syp:,}` ل.س إلى رصيدك،\n"
-            f"الرجاء إرسال مبلغ   **`{foreign_amount}` {currency}**\n"
+            f"الرجاء إرسال مبلغ  **`{foreign_amount}` {currency}**\n"
             f"إلى العنوان التالي:\n\n`{address}`\n\n"
             f"⚠️ **بعد التحويل، أرسل صورة الإشعار أو معرف العملية (TxID) هنا.**"
         )
