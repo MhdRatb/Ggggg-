@@ -170,34 +170,52 @@ safe_db_execute('''CREATE TABLE IF NOT EXISTS user_order_history
                 note TEXT,
                 admin_note,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_codes (
+safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_methods (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
-                daily_limit INTEGER DEFAULT 540000,
-                daily_used INTEGER DEFAULT 0,
-                last_reset_date TEXT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL, -- 'daily_limit_syp', 'unlimited_syp', 'foreign_currency'
+                instructions TEXT, -- رسالة التعليمات التي تظهر للمستخدم
                 is_active BOOLEAN DEFAULT TRUE
                 )''')
+
+# جدول جديد لعناوين الدفع المرتبطة بكل طريقة
+safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_addresses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                method_id INTEGER NOT NULL,
+                address TEXT NOT NULL, -- الرقم أو العنوان
+                currency TEXT DEFAULT 'SYP',
+                exchange_rate REAL, -- سعر الصرف الخاص بهذه العملة فقط
+                daily_limit INTEGER, -- الحد اليومي بالليرة السورية بعد التحويل
+                daily_used INTEGER DEFAULT 0,
+                last_reset_date TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                FOREIGN KEY(method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
+                )''')
+
+safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount_syp INTEGER NOT NULL, -- المبلغ بالليرة دائماً
+                address_id INTEGER NOT NULL, -- الربط مع عنوان الدفع المستخدم
+                transaction_id TEXT,
+                proof_type TEXT,
+                proof_content TEXT,
+                status TEXT DEFAULT 'pending', -- pending, pending_admin, completed, rejected, cancelled
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(address_id) REFERENCES payment_addresses(id)
+            )''')
 safe_db_execute('''CREATE TABLE IF NOT EXISTS disabled_buttons
              (button_name TEXT PRIMARY KEY,
               is_disabled BOOLEAN DEFAULT FALSE)''')
 if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_disabled'"):
     safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('recharge_disabled', '0')")
-safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                code_id INTEGER NOT NULL,
-                transaction_id TEXT,
-                proof_type TEXT,
-                proof_content TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
+
 safe_db_execute('''CREATE TABLE IF NOT EXISTS admins
              (admin_id INTEGER PRIMARY KEY,
               username TEXT,
               added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_disabled'"):
+    safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('recharge_disabled', '0')")
 
 if not safe_db_execute("SELECT * FROM admins WHERE admin_id=?", (ADMIN_ID,)):
     safe_db_execute("INSERT INTO admins (admin_id) VALUES (?)", (ADMIN_ID,))
@@ -237,36 +255,69 @@ def ensure_manual_tables_updated():
 
 ensure_manual_tables_updated()
 # ============= إضافة الدوال للنسخ الاحتياطي والاستعادة =============
-def initialize_database():
-    safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                code_id INTEGER,
-                transaction_id TEXT,
-                proof_type TEXT,
-                proof_content TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-    safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
-                daily_limit INTEGER DEFAULT 540000,
-                daily_used INTEGER DEFAULT 0,
-                last_reset_date TEXT,
-                is_active BOOLEAN DEFAULT TRUE
-            )''')
-    if not safe_db_execute("SELECT * FROM bot_settings WHERE key='recharge_disabled'"):
-        safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('recharge_disabled', '0')")
-    if not safe_db_execute("SELECT * FROM exchange_rate"):
-        safe_db_execute("INSERT INTO exchange_rate (rate, updated_at) VALUES (?, ?)",
-                      (DEFAULT_EXCHANGE_RATE, datetime.now()))
-    if not safe_db_execute("SELECT * FROM bot_settings WHERE key='channel_id'"):
-        safe_db_execute("INSERT INTO bot_settings (key, value) VALUES ('channel_id', '')")
-    if not safe_db_execute("SELECT * FROM admins WHERE admin_id=?", (ADMIN_ID,)):
-        safe_db_execute("INSERT INTO admins (admin_id) VALUES (?)", (ADMIN_ID,))
 
+def upgrade_database_schema():
+    """
+    تضمن هذه الدالة أن هيكل قاعدة البيانات محدّث.
+    تقوم بإضافة الجداول الجديدة وحذف الجداول القديمة.
+    """
+    print("بدء عملية ترقية بنية قاعدة البيانات...")
+    try:
+        # 1. إضافة الجداول الجديدة إذا لم تكن موجودة
+        safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_methods (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        type TEXT NOT NULL,
+                        instructions TEXT,
+                        is_active BOOLEAN DEFAULT TRUE
+                        )''')
+        safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_addresses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        method_id INTEGER NOT NULL,
+                        address TEXT NOT NULL,
+                        currency TEXT DEFAULT 'SYP',
+                        exchange_rate REAL,
+                        daily_limit INTEGER,
+                        daily_used INTEGER DEFAULT 0,
+                        last_reset_date TEXT,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        FOREIGN KEY(method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
+                        )''')
+        safe_db_execute('''CREATE TABLE IF NOT EXISTS banned_users (
+                        user_id INTEGER PRIMARY KEY,
+                        banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )''')
+
+        # 2. حذف جدول recharge_codes القديم إذا كان موجودًا
+        safe_db_execute("DROP TABLE IF EXISTS recharge_codes")
+        
+        # 3. إعادة إنشاء جدول recharge_requests بالهيكل الصحيح
+        # نحذفه أولاً لضمان عدم وجود تعارض في الأعمدة ثم ننشئه من جديد
+        safe_db_execute("DROP TABLE IF EXISTS recharge_requests")
+        safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        amount_syp INTEGER NOT NULL,
+                        address_id INTEGER NOT NULL,
+                        transaction_id TEXT,
+                        proof_type TEXT,
+                        proof_content TEXT,
+                        status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(address_id) REFERENCES payment_addresses(id)
+                    )''')
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(payment_methods)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'min_amount' not in columns:
+            safe_db_execute("ALTER TABLE payment_methods ADD COLUMN min_amount INTEGER DEFAULT 0")
+            print("تمت إضافة عمود min_amount إلى جدول payment_methods")
+        
+        print("✅ تمت ترقية بنية قاعدة البيانات بنجاح.")
+        return True
+    except Exception as e:
+        print(f"❌ فشلت عملية الترقية: {e}")
+        return False
 def ensure_columns_exist():
     try:
         columns = safe_db_execute("PRAGMA table_info(recharge_requests)")
@@ -328,67 +379,43 @@ def restore_database(call):
 
 def process_restore(message):
     try:
-        if not message.document:
-            raise ValueError("يجب إرسال ملف .db")
-        if not message.document.file_name.endswith('.db'):
-            raise ValueError("الملف غير صالح! يجب أن يكون بصيغة .db")
+        if not message.document or not message.document.file_name.endswith('.db'):
+            bot.send_message(message.chat.id, "❌ ملف غير صالح! يجب أن يكون بصيغة .db")
+            return
+
+        # 1. إغلاق الاتصال الحالي وتحميل الملف الجديد
         close_db_connection()
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
+        
         temp_name = f"restore_temp_{datetime.now().strftime('%Y%m%d%H%M%S')}.db"
         with open(temp_name, 'wb') as f:
             f.write(downloaded_file)
-        test_conn = sqlite3.connect(temp_name)
-        cursor = test_conn.cursor()
-        required_tables = [
-            '''CREATE TABLE IF NOT EXISTS recharge_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                code_id INTEGER NOT NULL,
-                transaction_id TEXT,
-                proof_type TEXT,
-                proof_content TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''',
-                '''CREATE TABLE IF NOT EXISTS recharge_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
-                daily_limit INTEGER DEFAULT 540000,
-                daily_used INTEGER DEFAULT 0,
-                last_reset_date TEXT,
-                is_active BOOLEAN DEFAULT TRUE
-            )''',
-                '''CREATE TABLE IF NOT EXISTS admins
-                (admin_id INTEGER PRIMARY KEY,
-                username TEXT,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''',
-                '''CREATE TABLE IF NOT EXISTS disabled_buttons
-                (button_name TEXT PRIMARY KEY,
-                is_disabled BOOLEAN DEFAULT FALSE
-            )'''
-        ]
-        for table in required_tables:
-            try:
-                cursor.execute(table)
-            except Exception as e:
-                print(f"Error creating table: {str(e)}")
-        test_conn.commit()
-        test_conn.close()
+        
+        # 2. استبدال قاعدة البيانات الحالية بالنسخة الاحتياطية
         shutil.move(temp_name, 'wallet.db')
+        bot.send_message(message.chat.id, "⏳ تم استلام النسخة الاحتياطية، جاري تحديث الهيكل...")
+
+        # 3. إعادة الاتصال بقاعدة البيانات الجديدة (المستعادة)
         global conn
         conn = sqlite3.connect('wallet.db', check_same_thread=False)
-        ensure_manual_tables_updated()
-        initialize_database()
-        ensure_columns_exist()
-        bot.send_message(message.chat.id, "✅ تم استعادة النسخة بنجاح مع تحديث الهيكل!")
+        
+        # ================== الخطوة الأهم ==================
+        # 4. استدعاء دالة الترقية لتحديث بنية قاعدة البيانات المستعادة
+        if upgrade_database_schema():
+            bot.send_message(message.chat.id, "✅ تمت استعادة النسخة الاحتياطية وتحديث هيكلها بنجاح!")
+        else:
+            bot.send_message(message.chat.id, "⚠️ تمت استعادة النسخة، لكن ربما حدث خطأ أثناء ترقية الهيكل. يرجى مراجعة السجلات.")
+        # ===============================================
+
     except sqlite3.DatabaseError as e:
-        bot.send_message(message.chat.id, f"❌ ملف تالف: {str(e)}")
+        bot.send_message(message.chat.id, f"❌ ملف قاعدة بيانات تالف: {str(e)}")
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ فشل الاستعادة: {str(e)}")
+        bot.send_message(message.chat.id, f"❌ فشلت عملية الاستعادة: {str(e)}")
     finally:
+        # التأكد من إعادة الاتصال أو حذف الملف المؤقت في حال حدوث خطأ
+        if 'conn' not in globals() or conn is None:
+            conn = sqlite3.connect('wallet.db', check_same_thread=False)
         if 'temp_name' in locals() and os.path.exists(temp_name):
             os.remove(temp_name)
 
@@ -1088,7 +1115,324 @@ def handle_execute_remove_admin(call):
         call.message.chat.id,
         call.message.message_id
     )
+# =================================================================
+# |||           بداية دوال الشحن الجديدة للمستخدم                |||
+# =================================================================
 
+@bot.message_handler(func=lambda msg: msg.text == 'رصيدي 💰')
+def show_balance_handler(message):
+    user_id = message.from_user.id
+    if is_bot_paused() and not is_admin(user_id):
+        bot.send_message(message.chat.id, "⏸️ البوت متوقف مؤقتًا.")
+        return
+
+    try:
+        balance = get_balance(user_id)
+        markup = types.InlineKeyboardMarkup()
+        
+        recharge_disabled_setting = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")
+        is_recharge_disabled = recharge_disabled_setting and recharge_disabled_setting[0][0] == '1'
+
+        if not is_recharge_disabled or is_admin(user_id):
+            markup.add(types.InlineKeyboardButton("إعادة تعبئة الرصيد 💳", callback_data="recharge_balance"))
+
+        bot.send_message(message.chat.id, f"رصيدك الحالي: {balance:,} ل.س", reply_markup=markup)
+    except Exception as e:
+        print(f"Error showing balance: {str(e)}")
+        bot.send_message(message.chat.id, "❌ حدث خطأ في جلب رصيدك!")
+
+# 1. تبدأ عملية الشحن من هنا
+def handle_recharge_request(message):
+    try:
+        recharge_disabled = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")[0][0] == '1'
+        if recharge_disabled and not is_admin(message.from_user.id):
+            bot.send_message(message.chat.id, "⏸️ خدمة إعادة تعبئة الرصيد متوقفة حالياً.")
+            return
+
+        active_methods = safe_db_execute("SELECT id, name FROM payment_methods WHERE is_active = 1")
+        if not active_methods:
+            bot.send_message(message.chat.id, "⚠️ لا توجد طرق دفع متاحة حالياً.")
+            return
+
+        markup = types.InlineKeyboardMarkup()
+        for method_id, name in active_methods:
+            markup.add(types.InlineKeyboardButton(name, callback_data=f'select_method_{method_id}'))
+        
+        bot.send_message(message.chat.id, "اختر طريقة الدفع المناسبة:", reply_markup=markup)
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
+# 2. المستخدم يختار طريقة الدفع
+@bot.callback_query_handler(func=lambda call: call.data.startswith('select_method_'))
+def handle_payment_method_selection(call):
+    try:
+        method_id = int(call.data.split('_')[2])
+        
+        active_requests_count = safe_db_execute(
+            "SELECT COUNT(*) FROM recharge_requests WHERE user_id=? AND (status='pending' OR status='pending_admin')",
+            (call.from_user.id,)
+        )[0][0]
+
+        if active_requests_count > 0:
+            bot.answer_callback_query(call.id, "لديك طلب شحن قيد المعالجة بالفعل!", show_alert=True)
+            return
+
+        method_type = safe_db_execute("SELECT type FROM payment_methods WHERE id=?", (method_id,))[0][0]
+
+        if method_type == 'foreign_currency':
+            # 1. تعديل الاستعلام لجلب سعر الصرف والعملة بالإضافة إلى الـ ID
+            address_info_query = safe_db_execute(
+                "SELECT id, currency, exchange_rate FROM payment_addresses WHERE method_id=? AND is_active=1 LIMIT 1",
+                (method_id,)
+            )
+            
+            if not address_info_query:
+                bot.answer_callback_query(call.id, "عفواً، طريقة الدفع هذه غير متاحة حالياً.", show_alert=True)
+                return
+            
+            # 2. استخراج البيانات الجديدة
+            address_id, currency, rate = address_info_query[0]
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add('❌ إلغاء العملية')
+            
+            # 3. بناء رسالة جديدة ومحسّنة لعرض سعر الصرف للمستخدم
+            user_message = (
+                f"✅ طريقة الدفع المحددة: **{currency}**\n"
+                f"💱 سعر الصرف الحالي: **{rate:,}** ل.س لكل 1 {currency}\n\n"
+                f"الآن، أدخل المبلغ الذي تريد أن يصل إلى رصيدك **بالليرة السورية**:"
+            )
+            
+            # 4. إرسال الرسالة الجديدة
+            msg = bot.send_message(
+                call.message.chat.id,
+                user_message,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, process_foreign_currency_amount, address_id)
+
+        else: # (daily_limit_syp أو unlimited_syp)
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add('❌ إلغاء العملية')
+            msg = bot.send_message(
+                call.message.chat.id,
+                "💰 الرجاء إدخال المبلغ الذي تريد شحنه **بالليرة السورية**:",
+                reply_markup=markup
+            )
+            bot.register_next_step_handler(msg, process_recharge_amount, method_id)
+            
+    except Exception as e:
+        print(f"Error in handle_payment_method_selection: {e}")
+        bot.answer_callback_query(call.id, "حدث خطأ ما، يرجى المحاولة لاحقًا.", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('select_fc_addr_'))
+def handle_foreign_currency_address_selection(call):
+    address_id = int(call.data.split('_')[3])
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add('❌ إلغاء العملية')
+
+    # نطلب من المستخدم إدخال المبلغ بالليرة السورية
+    msg = bot.send_message(
+        call.message.chat.id,
+        "أدخل المبلغ الذي تريد أن يصل إلى رصيدك **بالليرة السورية**:",
+        reply_markup=markup
+    )
+    bot.register_next_step_handler(msg, process_foreign_currency_amount, address_id)
+
+def process_foreign_currency_amount(message, address_id):
+    if message.text == '❌ إلغاء العملية':
+        bot.send_message(message.chat.id, "تم إلغاء العملية.", reply_markup=main_menu(message.from_user.id))
+        return
+    try:
+        amount_syp = int(message.text.strip())
+        if amount_syp <= 0:
+            raise ValueError("المبلغ يجب أن يكون أكبر من صفر")
+
+        address_info = safe_db_execute(
+            "SELECT address, currency, exchange_rate FROM payment_addresses WHERE id=?",
+            (address_id,)
+        )[0]
+        address, currency, rate = address_info
+
+        # **هنا يتم حساب المبلغ بالعملة الأجنبية**
+        foreign_amount = round(amount_syp / rate, 4) # تقريب لأربع خانات عشرية
+
+        # إنشاء طلب مبدئي
+        safe_db_execute(
+            "INSERT INTO recharge_requests (user_id, amount_syp, address_id, status) VALUES (?, ?, ?, 'pending')",
+            (message.from_user.id, amount_syp, address_id)
+        )
+        request_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]
+
+        # عرض التعليمات النهائية للمستخدم
+        final_instructions = (
+            f"لإضافة `{amount_syp:,}` ل.س إلى رصيدك،\n"
+            f"الرجاء إرسال مبلغ   **`{foreign_amount}` {currency}**\n"
+            f"إلى العنوان التالي:\n\n`{address}`\n\n"
+            f"⚠️ **بعد التحويل، أرسل صورة الإشعار أو معرف العملية (TxID) هنا.**"
+        )
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add('❌ إلغاء العملية')
+        msg = bot.send_message(message.chat.id, final_instructions, reply_markup=markup, parse_mode='Markdown')
+        bot.register_next_step_handler(msg, process_recharge_proof, request_id, address_id, amount_syp)
+
+    except ValueError:
+        msg = bot.send_message(message.chat.id, "❌ مبلغ غير صالح. الرجاء إدخال رقم صحيح بالليرة السورية.")
+        bot.register_next_step_handler(msg, process_foreign_currency_amount, address_id)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {e}")
+
+# 3. المستخدم يدخل المبلغ
+def process_recharge_amount(message, method_id):
+    if message.text == '❌ إلغاء العملية':
+        bot.send_message(message.chat.id, "تم إلغاء العملية.", reply_markup=main_menu(message.from_user.id))
+        return
+    try:
+        amount_syp = int(message.text.strip())
+        
+        # ================== منطق التحقق الجديد ==================
+        method_details = safe_db_execute("SELECT type, instructions, min_amount FROM payment_methods WHERE id=?", (method_id,))[0]
+        method_type, instructions, min_amount = method_details
+        
+        if min_amount and amount_syp < min_amount:
+            bot.send_message(message.chat.id, f"❌ المبلغ الذي أدخلته أقل من الحد الأدنى المسموح به لهذه الطريقة وهو: {min_amount:,} ل.س")
+            # نطلب منه المحاولة مرة أخرى
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add('❌ إلغاء العملية')
+            msg = bot.send_message(message.chat.id, "يرجى إدخال مبلغ صحيح:", reply_markup=markup)
+            bot.register_next_step_handler(msg, process_recharge_amount, method_id)
+            return
+        # =======================================================
+
+        # ... (باقي كود الدالة يبقى كما هو دون تغيير) ...
+        
+        selected_address = None
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if method_type == 'daily_limit_syp':
+            safe_db_execute("UPDATE payment_addresses SET daily_used=0, last_reset_date=? WHERE last_reset_date != ? OR last_reset_date IS NULL", (today, today))
+            addresses = safe_db_execute(
+                "SELECT id, address, daily_limit, daily_used FROM payment_addresses WHERE method_id=? AND is_active=1", (method_id,)
+            )
+            for addr_id, address, limit, used in addresses:
+                if (limit - used) >= amount_syp:
+                    selected_address = (addr_id, address)
+                    break
+            if not selected_address:
+                bot.send_message(message.chat.id, "⚠️ عفواً، لا يوجد خط يستقبل هذا المبلغ حالياً. يرجى المحاولة بمبلغ أقل أو في وقت لاحق.")
+                return
+
+        elif method_type in ['unlimited_syp', 'foreign_currency']:
+            address = safe_db_execute("SELECT id, address FROM payment_addresses WHERE method_id=? AND is_active=1 LIMIT 1", (method_id,))
+            if not address:
+                bot.send_message(message.chat.id, "⚠️ لا يوجد عنوان دفع متاح لهذه الطريقة حالياً.")
+                return
+            selected_address = address[0]
+
+        address_id, address_text = selected_address
+
+        safe_db_execute(
+            "INSERT INTO recharge_requests (user_id, amount_syp, address_id, status) VALUES (?, ?, ?, 'pending')",
+            (message.from_user.id, amount_syp, address_id)
+        )
+        request_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]
+
+        final_instructions = (
+            f"{instructions}\n\n"
+            f"الرجاء إرسال مبلغ: `{amount_syp:,}` ل.س\n"
+            f"إلى العنوان التالي:\n`{address_text}`\n\n"
+            f"⚠️ **بعد التحويل، قم بإرسال صورة الإشعار أو رقم العملية هنا لإتمام الطلب.**"
+        )
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add('❌ إلغاء العملية')
+        msg = bot.send_message(message.chat.id, final_instructions, reply_markup=markup, parse_mode='Markdown')
+        bot.register_next_step_handler(msg, process_recharge_proof, request_id, address_id, amount_syp)
+
+    except ValueError:
+        msg = bot.send_message(message.chat.id, "❌ مبلغ غير صالح. الرجاء إدخال رقم صحيح.")
+        bot.register_next_step_handler(msg, process_recharge_amount, method_id)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ فادح: {e}")
+# 4. المستخدم يرسل إثبات الدفع
+def process_recharge_proof(message, request_id, address_id, amount_syp):
+    if message.text == '❌ إلغاء العملية':
+        safe_db_execute("UPDATE recharge_requests SET status='cancelled' WHERE id=?", (request_id,))
+        bot.send_message(message.chat.id, "تم إلغاء الطلب.", reply_markup=main_menu(message.from_user.id))
+        return
+        
+    try:
+        proof_type, proof_content, transaction_id = None, None, None
+        if message.photo:
+            proof_type = "صورة"
+            proof_content = message.photo[-1].file_id
+        elif message.text:
+            proof_type = "رقم العملية"
+            proof_content = message.text.strip()
+            transaction_id = proof_content
+        else:
+            bot.send_message(message.chat.id, "نوع الإثبات غير مدعوم. أرسل صورة أو نص.")
+            bot.register_next_step_handler(message, process_recharge_proof, request_id, address_id, amount_syp)
+            return
+
+        safe_db_execute(
+            "UPDATE recharge_requests SET transaction_id=?, proof_type=?, proof_content=?, status='pending_admin' WHERE id=?",
+            (transaction_id, proof_type, proof_content, request_id)
+        )
+        
+        notify_admin_recharge_request(message.from_user, request_id, amount_syp, proof_type, proof_content, address_id)
+        
+        bot.send_message(message.chat.id, "✅ تم استلام طلبك بنجاح وهو قيد المراجعة الآن.", reply_markup=main_menu(message.from_user.id))
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء معالجة الإثبات: {e}")
+        safe_db_execute("UPDATE recharge_requests SET status='failed' WHERE id=?", (request_id,))
+
+# 5. إشعار الأدمن
+def notify_admin_recharge_request(user, request_id, amount_syp, proof_type, proof_content, address_id):
+    try:
+        address_info = safe_db_execute("SELECT p_addr.address, p_meth.name FROM payment_addresses p_addr JOIN payment_methods p_meth ON p_addr.method_id = p_meth.id WHERE p_addr.id=?", (address_id,))[0]
+        address, method_name = address_info
+
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ الموافقة", callback_data=f"approve_recharge_{request_id}"),
+            types.InlineKeyboardButton("❌ الرفض", callback_data=f"reject_recharge_{request_id}")
+        )
+        user_name = html.escape(f"{user.first_name or ''} {user.last_name or ''}".strip())
+        user_link = f'<a href="tg://user?id={user.id}">{user_name}</a>'
+
+        admin_msg = (
+            f"🔄 طلب شحن جديد #{request_id}\n\n"
+            f"👤 المستخدم: {user_link}\n"
+            f"💰 المبلغ: {amount_syp:,} ل.س\n"
+            f"💳 الطريقة: {method_name}\n"
+            f"📍 العنوان: `{address}`\n"
+        )
+        
+        if proof_type == "صورة":
+            bot.send_photo(
+                ADMIN_ID,
+                proof_content,
+                caption=admin_msg,
+                reply_markup=markup,
+                parse_mode='HTML'
+            )
+        else: # رقم العملية
+            admin_msg += f"🔢 رقم العملية: `{proof_content}`"
+            bot.send_message(
+                ADMIN_ID,
+                admin_msg,
+                reply_markup=markup,
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        print(f"Error in notify_admin_recharge_request: {e}")
+
+# =================================================================
+# |||            نهاية دوال الشحن الجديدة للمستخدم                |||
+# =================================================================
 #========== free fire 2 ==================
 @bot.message_handler(func=lambda msg: msg.text == '🔥 Free Fire 2'and not is_button_disabled('freefire'))
 def show_freefire2_offers_handler(message):
@@ -2452,65 +2796,62 @@ def accept_recharge(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('approve_recharge_', 'reject_recharge_')))
 def handle_recharge_decision(call):
     try:
-        request_id = int(call.data.split('_')[2])
-        action = call.data.split('_')[0]
+        parts = call.data.split('_')
+        action = parts[0]
+        request_id = int(parts[2])
+
         request = safe_db_execute('''
-            SELECT user_id, amount, code_id 
+            SELECT user_id, amount_syp, address_id, status 
             FROM recharge_requests 
-            WHERE id = ? AND status = 'pending_admin'
+            WHERE id = ?
         ''', (request_id,))
+        
         if not request:
-            bot.answer_callback_query(call.id, "⚠️ الطلب غير موجود أو تم معالجته مسبقًا")
+            bot.answer_callback_query(call.id, "⚠️ الطلب غير موجود.")
             return
-        user_id, amount, code_id = request[0]
+        
+        user_id, amount, address_id, status = request[0]
+        if status != 'pending_admin':
+            bot.answer_callback_query(call.id, f"⚠️ هذا الطلب تمت معالجته مسبقاً ({status}).")
+            return
+
         if action == 'approve':
             update_balance(user_id, amount)
+            # تحديث المبلغ المستخدم للعنوان إذا كان له حد يومي
             safe_db_execute('''
-                UPDATE recharge_codes 
+                UPDATE payment_addresses 
                 SET daily_used = daily_used + ? 
-                WHERE id = ?
-            ''', (amount, code_id))
-            safe_db_execute('''
-                UPDATE recharge_requests 
-                SET status = 'completed' 
-                WHERE id = ?
-            ''', (request_id,))
+                WHERE id = ? AND daily_limit IS NOT NULL
+            ''', (amount, address_id))
+            safe_db_execute("UPDATE recharge_requests SET status = 'completed' WHERE id = ?", (request_id,))
+            
             bot.send_message(
                 user_id,
-                f"🎉 تمت الموافقة على طلبك!\n\n💰 تم إضافة {amount:,} ل.س إلى رصيدك"
+                f"🎉 تمت الموافقة على طلب الشحن!\n\n💰 تم إضافة {amount:,} ل.س إلى رصيدك."
             )
+            bot.answer_callback_query(call.id, "✅ تمت الموافقة بنجاح.")
+        
+        else: # action == 'reject'
+            safe_db_execute("UPDATE recharge_requests SET status = 'rejected' WHERE id = ?", (request_id,))
+            bot.send_message(
+                user_id,
+                f"❌ تم رفض طلب الشحن الخاص بك.\n\n"
+                f"يرجى التواصل مع الدعم لمزيد من المعلومات."
+            )
+            bot.answer_callback_query(call.id, "❌ تم رفض الطلب.")
+
+        # تحديث رسالة الأدمن
+        new_status_text = '✅ تمت الموافقة' if action == 'approve' else '❌ تم الرفض'
+        new_text = f"{call.message.caption or call.message.text}\n\n---\nتمت المعالجة بواسطة: @{call.from_user.username}\nالحالة: {new_status_text}"
+        
+        if call.message.photo:
+            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=new_text, reply_markup=None)
         else:
-            safe_db_execute('''
-                UPDATE recharge_requests 
-                SET status = 'rejected' 
-                WHERE id = ?
-            ''', (request_id,))
-            bot.send_message(
-                user_id,
-                f"❌ تم رفض طلب إعادة التعبئة \n\n"
-                f"يرجى التأكد من رقم العملية أو صورة الاشعار وإعادة المحاولة ⚠️"
-            )
-        try:
-            if call.message.photo:
-                bot.edit_message_caption(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    caption=f"{call.message.caption}\n\n{'✅ تمت الموافقة' if action == 'approve' else '❌ تم الرفض'}",
-                    reply_markup=None
-                )
-            else:
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text=f"{call.message.text}\n\n{'✅ تمت الموافقة' if action == 'approve' else '❌ تم الرفض'}",
-                    reply_markup=None
-                )
-        except Exception as e:
-            print(f"Error updating admin message: {str(e)}")
-        bot.answer_callback_query(call.id, "تمت المعالجة بنجاح")
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=new_text, reply_markup=None)
+
     except Exception as e:
         print(f"Error in handle_recharge_decision: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ حدث خطأ أثناء المعالجة")
+        bot.answer_callback_query(call.id, "❌ حدث خطأ أثناء المعالجة.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_product_'))
 def confirm_product_requires_id(call):
@@ -3349,203 +3690,374 @@ def process_order_search(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 
-@bot.callback_query_handler(func=lambda call: call.data == 'manage_recharge_codes')
-def handle_manage_recharge_codes(call):
-    try:
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("➕ إضافة كود", callback_data='add_recharge_code'),
-            types.InlineKeyboardButton("🗑️ حذف كود", callback_data='delete_recharge_code'),
-            types.InlineKeyboardButton("📋 عرض الأكواد", callback_data='list_recharge_codes'),
-            types.InlineKeyboardButton("🔄 إعادة تعيين", callback_data='reset_recharge_limits'),
-            types.InlineKeyboardButton("🔛 تعطيل/تفعيل", callback_data='toggle_recharge_service'),
-            types.InlineKeyboardButton("تنظيف طلبات الشحن", callback_data='clean_pending_recharges'),
-            types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')
-        )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="⚙️ <b>إدارة أكواد الشحن</b>\n\nاختر الإجراء المطلوب:",
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    except Exception as e:
-        print(f"Error in manage_recharge_codes: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ حدث خطأ في تحميل القائمة")
+# =================================================================
+# |||           بداية دوال إدارة طرق الدفع الجديدة              |||
+# =================================================================
 
-@bot.callback_query_handler(func=lambda call: call.data == 'add_recharge_code')
-def add_recharge_code(call):
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_payment_methods' and is_admin(call.from_user.id))
+def handle_manage_payment_methods(call):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    methods = safe_db_execute("SELECT id, name, type, is_active FROM payment_methods ORDER BY id")
+    
+    for method_id, name, method_type, is_active in methods:
+        status_icon = "✅" if is_active else "⏸️"
+        markup.add(types.InlineKeyboardButton(
+            f"{status_icon} {name}",
+            callback_data=f'view_method_{method_id}'
+        ))
+    
+    markup.add(types.InlineKeyboardButton("➕ إضافة طريقة دفع جديدة", callback_data='add_payment_method'))
+    recharge_disabled = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")[0][0] == '1'
+    toggle_text = "▶️ تفعيل خدمة الشحن" if recharge_disabled else "⏸️ تعطيل خدمة الشحن"
+    markup.add(types.InlineKeyboardButton(toggle_text, callback_data='toggle_recharge_service'))
+    
+    # ================== الزر الجديد ==================
+    markup.add(types.InlineKeyboardButton("🧹 تنظيف طلبات الشحن المعلقة", callback_data='clean_pending_recharges'))
+    # ===============================================
+
+    markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data='admin_panel'))
+    
+    bot.edit_message_text(
+        "💳 إدارة طرق الدفع:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == 'clean_pending_recharges' and is_admin(call.from_user.id))
+def clean_pending_recharges_handler(call):
+    try:
+        # استخدام قفل قاعدة البيانات لضمان الأمان
+        with db_lock:
+            cursor = conn.cursor()
+            # استهداف الطلبات ذات الحالة 'pending' (بانتظار المستخدم) و 'pending_admin' (بانتظار الأدمن)
+            cursor.execute("UPDATE recharge_requests SET status = 'failed' WHERE status = 'pending' OR status = 'pending_admin'")
+            affected_rows = cursor.rowcount  # الحصول على عدد الطلبات التي تم تحديثها
+            conn.commit()
+            cursor.close()
+        
+        # إرسال رد للأدمن يفيد بنجاح العملية وعدد الطلبات التي تم تنظيفها
+        bot.answer_callback_query(call.id, f"✅ تم تنظيف {affected_rows} طلب شحن معلق بنجاح.")
+        
+        # تحديث القائمة لإزالة أي إشعارات قديمة (اختياري)
+        handle_manage_payment_methods(call)
+
+    except Exception as e:
+        print(f"Error cleaning pending recharges: {e}")
+        bot.answer_callback_query(call.id, "❌ حدث خطأ أثناء عملية التنظيف.")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'add_payment_method' and is_admin(call.from_user.id))
+def add_payment_method(call):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("محدود يومياً (سيريتل كاش)", callback_data='add_method_type_daily_limit_syp'))
+    markup.add(types.InlineKeyboardButton("غير محدود (شام كاش, حوالات)", callback_data='add_method_type_unlimited_syp'))
+    markup.add(types.InlineKeyboardButton("عملة أجنبية (USDT, etc.)", callback_data='add_method_type_foreign_currency'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_payment_methods'))
+    bot.edit_message_text("اختر نوع طريقة الدفع الجديدة:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('add_method_type_') and is_admin(call.from_user.id))
+def process_add_method_type(call):
+    method_type = call.data.replace('add_method_type_', '')
+    msg = bot.send_message(call.message.chat.id, "أرسل اسم طريقة الدفع (مثال: سيريتل كاش - خط أعمال):")
+    bot.register_next_step_handler(msg, process_add_method_name, method_type)
+
+def process_add_method_name(message, method_type):
+    try:
+        name = message.text.strip()
+        instructions = "يرجى اتباع التعليمات لإتمام عملية الدفع." # يمكنك تغييرها لاحقاً
+        safe_db_execute(
+            "INSERT INTO payment_methods (name, type, instructions) VALUES (?, ?, ?)",
+            (name, method_type, instructions)
+        )
+        bot.send_message(message.chat.id, f"✅ تم إضافة طريقة الدفع '{name}' بنجاح.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('view_method_') and is_admin(call.from_user.id))
+def view_specific_method(call):
+    method_id = int(call.data.split('_')[2])
+    method = safe_db_execute("SELECT name, is_active, min_amount FROM payment_methods WHERE id=?", (method_id,))[0]
+    name, is_active, min_amount = method
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    toggle_text = "❌ تعطيل" if is_active else "✅ تفعيل"
+    
+    markup.add(
+        types.InlineKeyboardButton("➕ إضافة عنوان/رقم جديد", callback_data=f'add_address_{method_id}'),
+        types.InlineKeyboardButton(f"{toggle_text} الطريقة", callback_data=f'toggle_method_{method_id}')
+    )
+    
+    # ================== الزر الجديد ==================
+    markup.add(types.InlineKeyboardButton(f"💰 تحديد الحد الأدنى ({min_amount or 0} ل.س)", callback_data=f'edit_min_amount_{method_id}'))
+    # ===============================================
+
+    addresses = safe_db_execute("SELECT id, address, is_active FROM payment_addresses WHERE method_id=?", (method_id,))
+    if addresses:
+        markup.add(types.InlineKeyboardButton("--- (العناوين المسجلة) ---", callback_data='no_action'))
+        for addr_id, address, addr_is_active in addresses:
+            addr_status_icon = "✅" if addr_is_active else "❌"
+            markup.add(types.InlineKeyboardButton(
+                f"{addr_status_icon} {address[:30]}...",
+                callback_data=f'edit_address_{addr_id}'
+            ))
+    
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_payment_methods'))
+    bot.edit_message_text(f"إدارة: {name}", call.message.chat.id, call.message.message_id, reply_markup=markup)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('edit_min_amount_') and is_admin(call.from_user.id))
+def edit_method_min_amount(call):
+    method_id = int(call.data.split('_')[3])
     msg = bot.send_message(
         call.message.chat.id,
-        "أرسل كود الشحن الجديد:",
+        "أرسل الحد الأدنى للمبلغ بالليرة السورية (أرسل 0 لإلغائه):",
         reply_markup=types.ForceReply(selective=True)
     )
-    bot.register_next_step_handler(msg, process_new_recharge_code)
+    bot.register_next_step_handler(msg, process_new_min_amount, method_id)
 
-def process_new_recharge_code(message):
+def process_new_min_amount(message, method_id):
     try:
-        code = message.text.strip()
-        if not code.isdigit():
-            raise ValueError("يجب أن يتكون كود الشحن من أرقام فقط")
-        safe_db_execute('''
-            INSERT INTO recharge_codes (code, last_reset_date)
-            VALUES (?, ?)
-        ''', (code, datetime.now().strftime("%Y-%m-%d")))
-        bot.send_message(
-            message.chat.id,
-            f"✅ تمت إضافة كود الشحن {code} بنجاح",
-            reply_markup=main_menu(message.from_user.id)
-        )
-    except sqlite3.IntegrityError:
-        bot.send_message(
-            message.chat.id,
-            "❌ هذا الكود موجود مسبقاً!",
-            reply_markup=main_menu(message.from_user.id)
-        )
-    except Exception as e:
-        bot.send_message(
-            message.chat.id,
-            f"❌ حدث خطأ: {str(e)}",
-            reply_markup=main_menu(message.from_user.id)
-        )
-
-@bot.callback_query_handler(func=lambda call: call.data == 'delete_recharge_code')
-def handle_delete_recharge_code(call):
-    try:
-        codes = safe_db_execute("SELECT id, code FROM recharge_codes")
-        if not codes:
-            bot.answer_callback_query(call.id, "⚠️ لا توجد أكواد متاحة للحذف")
+        min_amount = int(message.text.strip())
+        if min_amount < 0:
+            bot.send_message(message.chat.id, "❌ لا يمكن أن يكون المبلغ سالبًا.")
             return
-        markup = types.InlineKeyboardMarkup()
-        for code_id, code in codes:
-            markup.add(types.InlineKeyboardButton(
-                f"🗑️ {code}",
-                callback_data=f'confirm_code_{code_id}'
-            ))
-        markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_recharge_codes'))
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="اختر الكود الذي تريد حذفه:",
-            reply_markup=markup
-        )
-    except Exception as e:
-        print(f"Error in delete_recharge_code: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ فشل في تحميل الأكواد")
+            
+        safe_db_execute("UPDATE payment_methods SET min_amount=? WHERE id=?", (min_amount, method_id))
+        bot.send_message(message.chat.id, f"✅ تم تحديث الحد الأدنى بنجاح إلى: {min_amount:,} ل.س")
+        
+        # للعودة، ننشئ call object مؤقت
+        temp_call = types.CallbackQuery(id=0, from_user=message.from_user, data=f'view_method_{method_id}', chat_instance=0, json_string="")
+        temp_call.message = message 
+        view_specific_method(temp_call)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_code_'))
-def handle_confirm_delete_code(call):
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {e}")
+@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_method_') and is_admin(call.from_user.id))
+def toggle_method_status(call):
+    method_id = int(call.data.split('_')[2])
+    safe_db_execute("UPDATE payment_methods SET is_active = NOT is_active WHERE id=?", (method_id,))
+    bot.answer_callback_query(call.id, "✅ تم تغيير الحالة")
+    view_specific_method(call) # تحديث العرض
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('add_address_') and is_admin(call.from_user.id))
+def add_address_to_method(call):
+    method_id = int(call.data.split('_')[2])
+    msg = bot.send_message(call.message.chat.id, "أرسل العنوان/الرقم الجديد:")
+    bot.register_next_step_handler(msg, process_add_address_text, method_id)
+
+def process_add_address_text(message, method_id):
+    address = message.text.strip()
+    method_type = safe_db_execute("SELECT type FROM payment_methods WHERE id=?", (method_id,))[0][0]
+    
+    # بناءً على نوع الطريقة، نطلب معلومات إضافية
+    if method_type == 'daily_limit_syp':
+        msg = bot.send_message(message.chat.id, "أرسل الحد اليومي للاستقبال بالليرة السورية (مثال: 540000):")
+        bot.register_next_step_handler(msg, process_add_address_limit, method_id, address)
+    elif method_type == 'foreign_currency':
+        msg = bot.send_message(message.chat.id, "أرسل رمز العملة وسعر الصرف مقابل الليرة (مثال: USDT 15000):")
+        bot.register_next_step_handler(msg, process_add_address_currency, method_id, address)
+    else: # unlimited_syp
+        safe_db_execute("INSERT INTO payment_addresses (method_id, address) VALUES (?, ?)", (method_id, address))
+        bot.send_message(message.chat.id, "✅ تم إضافة العنوان بنجاح.")
+
+def process_add_address_limit(message, method_id, address):
     try:
-        code_id = call.data.split('_')[3]
-        code_info = safe_db_execute("SELECT code FROM recharge_codes WHERE id=?", (code_id,))
-        if not code_info:
-            bot.answer_callback_query(call.id, "⚠️ الكود غير موجود")
+        limit = int(message.text.strip())
+        safe_db_execute(
+            "INSERT INTO payment_addresses (method_id, address, daily_limit) VALUES (?, ?, ?)",
+            (method_id, address, limit)
+        )
+        bot.send_message(message.chat.id, "✅ تم إضافة العنوان مع الحد اليومي بنجاح.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ رقم غير صالح. يرجى المحاولة مرة أخرى.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ: {e}")
+
+def process_add_address_currency(message, method_id, address):
+    try:
+        parts = message.text.split()
+        currency = parts[0].upper()
+        rate = float(parts[1])
+        safe_db_execute(
+            "INSERT INTO payment_addresses (method_id, address, currency, exchange_rate) VALUES (?, ?, ?, ?)",
+            (method_id, address, currency, rate)
+        )
+        bot.send_message(message.chat.id, "✅ تم إضافة عنوان العملة الأجنبية بنجاح.")
+    except (ValueError, IndexError):
+        bot.send_message(message.chat.id, "❌ صيغة غير صالحة. الرجاء إرسال رمز العملة ثم السعر.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('edit_address_') and is_admin(call.from_user.id))
+def edit_specific_address(call):
+    address_id = int(call.data.split('_')[2])
+    
+    query = """
+    SELECT 
+        pa.address, pa.is_active, pa.currency, pa.exchange_rate, 
+        pa.daily_limit, pa.daily_used, pm.type, pm.id
+    FROM payment_addresses pa
+    JOIN payment_methods pm ON pa.method_id = pm.id
+    WHERE pa.id = ?
+    """
+    address_data = safe_db_execute(query, (address_id,))
+    if not address_data:
+        bot.answer_callback_query(call.id, "العنوان غير موجود!")
+        return
+    
+    addr, is_active, currency, rate, limit, used, m_type, method_id = address_data[0]
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    toggle_text = "❌ تعطيل" if is_active else "✅ تفعيل"
+    markup.add(types.InlineKeyboardButton(f"{toggle_text} العنوان", callback_data=f'toggle_addr_{address_id}'))
+
+    if m_type == 'daily_limit_syp':
+        markup.add(types.InlineKeyboardButton("🔧 تعديل الحد اليومي", callback_data=f'edit_limit_{address_id}'))
+        # ================== الزر الجديد (يظهر هنا فقط) ==================
+        markup.add(types.InlineKeyboardButton("🔄 إعادة تعيين يدوي", callback_data=f'reset_addr_limit_{address_id}'))
+        # =============================================================
+    elif m_type == 'foreign_currency':
+        markup.add(types.InlineKeyboardButton("💱 تعديل سعر الصرف", callback_data=f'edit_rate_{address_id}'))
+    
+    markup.add(
+        types.InlineKeyboardButton("✏️ تغيير العنوان", callback_data=f'change_addr_text_{address_id}'),
+        types.InlineKeyboardButton("🗑️ حذف العنوان", callback_data=f'delete_addr_{address_id}')
+    )
+    
+    markup.add(types.InlineKeyboardButton("🔙 رجوع للطريقة", callback_data=f'view_method_{method_id}'))
+    
+    status_text = f"إدارة العنوان:\n`{addr}`\n\n"
+    if limit is not None:
+        status_text += f"المستلم اليوم: **{used:,} / {limit:,} ل.س**\n"
+    if currency != 'SYP':
+        status_text += f"العملة: {currency}\nسعر الصرف: {rate}\n"
+        
+    bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode='Markdown')
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('toggle_addr_') and is_admin(call.from_user.id))
+def toggle_address_status(call):
+    address_id = int(call.data.split('_')[2])
+    safe_db_execute("UPDATE payment_addresses SET is_active = NOT is_active WHERE id=?", (address_id,))
+    bot.answer_callback_query(call.id, "✅ تم تغيير الحالة")
+    edit_specific_address(call) # تحديث العرض
+@bot.callback_query_handler(func=lambda call: call.data.startswith('edit_limit_') and is_admin(call.from_user.id))
+def edit_address_limit(call):
+    address_id = int(call.data.split('_')[2])
+    msg = bot.send_message(
+        call.message.chat.id,
+        "أرسل الحد اليومي الجديد للرقم (مثال: 540000):",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    bot.register_next_step_handler(msg, process_new_limit, address_id)
+
+def process_new_limit(message, address_id):
+    try:
+        new_limit = int(message.text.strip())
+        if new_limit < 0:
+            bot.send_message(message.chat.id, "❌ لا يمكن أن يكون الحد سالبًا.")
             return
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✅ نعم، احذف", callback_data=f'execute_delete_code_{code_id}'),
-            types.InlineKeyboardButton("❌ إلغاء", callback_data='delete_recharge_code')
-        )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=f"⚠️ هل أنت متأكد من حذف الكود: {code_info[0][0]}؟",
-            reply_markup=markup
-        )
+            
+        safe_db_execute("UPDATE payment_addresses SET daily_limit=? WHERE id=?", (new_limit, address_id))
+        bot.send_message(message.chat.id, f"✅ تم تحديث الحد اليومي بنجاح إلى: {new_limit:,} ل.س")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح.")
     except Exception as e:
-        print(f"Error in confirm_delete_code: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ فشل في تأكيد الحذف")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('execute_delete_code_'))
-def handle_execute_delete_code(call):
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {e}")
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reset_addr_limit_') and is_admin(call.from_user.id))
+def reset_address_limit_manually(call):
     try:
-        code_id = call.data.split('_')[3]
-        code_info = safe_db_execute("SELECT code FROM recharge_codes WHERE id=?", (code_id,))
-
-        if not code_info:
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="⚠️ الكود غير موجود أو تم حذفه مسبقاً."
-            )
-            bot.answer_callback_query(call.id, "الكود غير موجود.")
-            return
-
-        # تنفيذ الحذف من جدول recharge_codes
-        safe_db_execute("DELETE FROM recharge_codes WHERE id=?", (code_id,))
-
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=f"✅ تم حذف كود الشحن <code>{code_info[0][0]}</code> بنجاح",
-            parse_mode='HTML' # استخدم HTML لتنسيق الكود
-        )
-        bot.answer_callback_query(call.id, "✅ تم حذف الكود بنجاح.")
-
-        # العودة لقائمة الأكواد بعد ثانيتين
-        time.sleep(2)
-        # لإعادة تحميل قائمة إدارة أكواد الشحن
-        # يجب تمرير call كمعامل للدالة handle_manage_recharge_codes
-        # يجب أن تتوقع handle_manage_recharge_codes استلام call كمعامل
-        handle_manage_recharge_codes(call) 
-
-    except Exception as e:
-        print(f"Error in execute_delete_code: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ فشل في حذف الكود.")
-        bot.send_message(call.message.chat.id, f"❌ حدث خطأ أثناء حذف الكود: {str(e)}")
-
-@bot.callback_query_handler(func=lambda call: call.data == 'reset_recharge_limits')
-def handle_reset_recharge_limits(call):
-    try:
+        # ================== تم تصحيح الخطأ هنا ==================
+        # كان الفهرس خاطئًا ويشير إلى كلمة 'limit'
+        # تم تصحيحه إلى 3 لجلب الـ ID بشكل صحيح
+        address_id = int(call.data.split('_')[3])
+        # ========================================================
+        
         today = datetime.now().strftime("%Y-%m-%d")
-        safe_db_execute("UPDATE recharge_codes SET daily_used=0, last_reset_date=?", (today,))
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_recharge_codes'))
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="✅ تمت إعادة تعيين جميع الحصص اليومية للأكواد",
-            reply_markup=markup
+        
+        # إعادة تعيين العداد لهذا العنوان المحدد فقط
+        safe_db_execute(
+            "UPDATE payment_addresses SET daily_used=0, last_reset_date=? WHERE id=?",
+            (today, address_id)
         )
+        
+        bot.answer_callback_query(call.id, "✅ تم إعادة تعيين عداد الاستخدام اليومي لهذا العنوان بنجاح.")
+        
+        # تحديث العرض لإظهار أن العداد أصبح صفراً
+        edit_specific_address(call)
+        
     except Exception as e:
-        print(f"Error in reset_recharge_limits: {str(e)}")
-        bot.answer_callback_query(call.id, "❌ فشل في إعادة التعيين")
+        print(f"Error resetting address limit manually: {e}")
+        bot.answer_callback_query(call.id, "❌ حدث خطأ أثناء إعادة التعيين.")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('edit_rate_') and is_admin(call.from_user.id))
+def edit_address_rate(call):
+    address_id = int(call.data.split('_')[2])
+    msg = bot.send_message(
+        call.message.chat.id,
+        "أرسل سعر الصرف الجديد مقابل الليرة السورية (مثال: 15250.5):",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    bot.register_next_step_handler(msg, process_new_rate, address_id)
+
+def process_new_rate(message, address_id):
+    try:
+        new_rate = float(message.text.strip())
+        if new_rate <= 0:
+            bot.send_message(message.chat.id, "❌ يجب أن يكون سعر الصرف أكبر من صفر.")
+            return
+
+        safe_db_execute("UPDATE payment_addresses SET exchange_rate=? WHERE id=?", (new_rate, address_id))
+        bot.send_message(message.chat.id, f"✅ تم تحديث سعر الصرف بنجاح إلى: {new_rate}")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_addr_') and is_admin(call.from_user.id))
+def confirm_delete_address(call):
+    address_id = int(call.data.split('_')[2])
+    address = safe_db_execute("SELECT address, method_id FROM payment_addresses WHERE id=?", (address_id,))
+    if not address:
+        bot.answer_callback_query(call.id, "⚠️ العنوان محذوف بالفعل.")
+        return
+    
+    address_text, method_id = address[0]
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ نعم، احذف", callback_data=f'exec_delete_addr_{address_id}'),
+        types.InlineKeyboardButton("❌ إلغاء", callback_data=f'view_method_{method_id}')
+    )
+    bot.edit_message_text(
+        f"⚠️ هل أنت متأكد من حذف العنوان التالي بشكل نهائي؟\n`{address_text}`",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('exec_delete_addr_') and is_admin(call.from_user.id))
+def execute_delete_address(call):
+    address_id = int(call.data.split('_')[3])
+    safe_db_execute("DELETE FROM payment_addresses WHERE id=?", (address_id,))
+    bot.answer_callback_query(call.id, "✅ تم حذف العنوان بنجاح.")
+    # نحتاج للرجوع إلى قائمة طرق الدفع الرئيسية
+    # call.data هنا هو exec_delete_addr_{id}، سنقوم بتعديله للرجوع للقائمة الرئيسية
+    call.data = 'manage_payment_methods'
+    handle_manage_payment_methods(call)
+# =================================================================
+# |||            نهاية دوال إدارة طرق الدفع الجديدة              |||
+# =================================================================
 @bot.callback_query_handler(func=lambda call: call.data == 'admin_panel')
 def handle_back_to_admin_panel(call):
     try:
-        show_admin_panel(call.message)
+        # نستدعي الدالة مع تفعيل خيار التعديل
+        show_admin_panel(call.message, is_edit=True)
+        bot.answer_callback_query(call.id) # نرسل إشعارًا صامتًا لتأكيد الضغط على الزر
     except Exception as e:
         print(f"Error returning to admin panel: {str(e)}")
         bot.answer_callback_query(call.id, "❌ فشل في العودة للوحة التحكم")
-
-@bot.callback_query_handler(func=lambda call: call.data == 'list_recharge_codes')
-def list_recharge_codes(call):
-    codes = safe_db_execute('''
-        SELECT id, code, daily_limit, daily_used, is_active
-        FROM recharge_codes
-        ORDER BY is_active DESC, code
-    ''')
-    if not codes:
-        bot.answer_callback_query(call.id, "⚠️ لا توجد أكواد شحن مسجلة")
-        return
-    today = datetime.now().strftime("%Y-%m-%d")
-    response = "📋 قائمة أكواد الشحن:\n\n"
-    for code in codes:
-        code_id, code_num, limit, used, active = code
-        remaining = limit - used
-        status = "✅ مفعل" if active else "❌ معطل"
-        response += (
-            f"🔢 الكود: <code>{code_num}</code>\n"
-            f"📊 الحصة: {used:,}/{limit:,} ل.س (متبقي: {remaining:,})\n"
-            f"🔄 الحالة: {status}\n"
-            f"🆔 المعرف: {code_id}\n\n"
-        )
-    bot.send_message(
-        call.message.chat.id,
-        response,
-        parse_mode='HTML'
-    )
 
 @bot.callback_query_handler(func=lambda call: call.data == 'toggle_recharge_service')
 def toggle_recharge_feature(call):
@@ -3884,289 +4396,6 @@ def process_recharge_code_update(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 
-@bot.message_handler(func=lambda msg: msg.text == 'رصيدي 💰')
-def show_balance_handler(message):
-    user_id = message.from_user.id
-
-    # تحقق من إيقاف البوت العام
-    if is_bot_paused() and not is_admin(user_id):
-        bot.send_message(message.chat.id, "⏸️ البوت متوقف مؤقتًا.")
-        return
-
-    try:
-        balance = get_balance(user_id)
-        markup = types.InlineKeyboardMarkup()
-
-        # التحقق من حالة إعادة التعبئة لتحديد ما إذا كان سيتم عرض زر إعادة الشحن
-        recharge_disabled_setting = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")
-        # قيمة '1' تعني معطل، '0' تعني مفعل
-        is_recharge_disabled = recharge_disabled_setting and recharge_disabled_setting[0][0] == '1'
-
-        # إذا لم تكن إعادة الشحن معطلة (أو إذا كان المستخدم أدمن)، اعرض زر إعادة الشحن
-        if not is_recharge_disabled or is_admin(user_id):
-            markup.add(types.InlineKeyboardButton("إعادة تعبئة الرصيد 💳", callback_data="recharge_balance"))
-        else:
-            # إذا كانت إعادة الشحن معطلة للمستخدم العادي، يمكنك عرض رسالة توضيحية بدل الزر (اختياري)
-            # markup.add(types.InlineKeyboardButton("إعادة الشحن متوقفة حالياً ⏸️", callback_data="dummy_recharge_disabled"))
-            pass # أو لا تضيف أي زر إذا كنت لا تريد إظهار شيء
-
-        bot.send_message(message.chat.id, f"رصيدك الحالي: {balance:,} ل.س", reply_markup=markup)
-
-    except Exception as e:
-        print(f"Error showing balance: {str(e)}") # لغرض التصحيح
-        bot.send_message(message.chat.id, "❌ حدث خطأ في جلب رصيدك!")
-
-def handle_recharge_request(message):
-    try:
-        recharge_disabled = safe_db_execute("SELECT value FROM bot_settings WHERE key='recharge_disabled'")
-        if recharge_disabled and recharge_disabled[0][0] == '1' and not is_admin(message.from_user.id):
-            bot.send_message(message.chat.id, "⏸️ خدمة إعادة تعبئة الرصيد متوقفة حالياً")
-            return
-        active_requests = safe_db_execute('''
-            SELECT COUNT(*) FROM recharge_requests 
-            WHERE user_id=? AND (status='pending' OR status='pending_admin')
-        ''', (message.from_user.id,))
-        if active_requests and active_requests[0][0] > 0:
-            bot.send_message(
-                message.chat.id,
-                "⚠️ لديك طلب تعبئة قيد المعالجة بالفعل.\n"
-                "يرجى الانتظار حتى يتم معالجة طلبك الحالي قبل إرسال طلب جديد.",
-                reply_markup=main_menu(message.from_user.id)
-            )
-            return
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add('❌ إلغاء العملية')
-        msg = bot.send_message(
-            message.chat.id,
-            "💰 الرجاء إدخال المبلغ الذي تريد إرساله (بين 1000 و545000 ليرة سورية):",
-            reply_markup=markup
-        )
-        bot.register_next_step_handler(msg, process_recharge_amount)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
-
-def process_recharge_amount(message):
-    try:
-        if message.text == '❌ إلغاء العملية':
-            bot.send_message(
-                message.chat.id,
-                "تم إلغاء عملية الشحن",
-                reply_markup=main_menu(message.from_user.id)
-            )
-            return
-        amount = int(message.text)
-        if amount < 1000 or amount > 545000:
-            raise ValueError("المبلغ يجب أن يكون بين 1000 و545000 ليرة سورية")
-        active_requests = safe_db_execute('''
-            SELECT COUNT(*) FROM recharge_requests 
-            WHERE user_id=? AND (status='pending' OR status='pending_admin')
-        ''', (message.from_user.id,))
-        if active_requests and active_requests[0][0] > 0:
-            bot.send_message(
-                message.chat.id,
-                "⚠️ لديك طلب تعبئة قيد المعالجة بالفعل.\n"
-                "يرجى الانتظار حتى يتم معالجة طلبك الحالي قبل إرسال طلب جديد.",
-                reply_markup=main_menu(message.from_user.id)
-            )
-            return
-        today = datetime.now().strftime("%Y-%m-%d")
-        available_code = safe_db_execute('''
-            SELECT id, code, daily_limit, daily_used 
-            FROM recharge_codes 
-            WHERE is_active = 1 AND (last_reset_date != ? OR last_reset_date IS NULL)
-        ''', (today,))
-        if not available_code:
-            safe_db_execute('''
-                UPDATE recharge_codes 
-                SET daily_used = 0, last_reset_date = ?
-                WHERE last_reset_date != ? OR last_reset_date IS NULL
-            ''', (today, today))
-            available_code = safe_db_execute('''
-                SELECT id, code, daily_limit, daily_used 
-                FROM recharge_codes 
-                WHERE is_active = 1
-            ''')
-        selected_code = None
-        for code in available_code:
-            code_id, code_num, limit, used = code
-            remaining = limit - used
-            if remaining >= amount:
-                selected_code = (code_id, code_num)
-                break
-        if not selected_code:
-            bot.send_message(
-                message.chat.id,
-                "⚠️ لا توجد أكواد شحن متاحة حالياً تستطيع استقبال هذا المبلغ.",
-                reply_markup=main_menu(message.from_user.id)
-            )
-            return
-        code_id, code_num = selected_code
-        safe_db_execute('''
-            INSERT INTO recharge_requests (user_id, amount, code_id, status)
-            VALUES (?, ?, ?, 'pending')
-        ''', (message.from_user.id, amount, code_id))
-        request_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add('❌ إلغاء العملية')
-        instructions = (
-            f"📌 لاستكمال عملية الشحن:\n\n"
-            f"1. قم بإرسال المبلغ ({amount:,} ل.س) إلى كود سيريتل كاش:\n"
-            f"<code>{code_num}</code>\n\n"
-            f"استخدم التحويل اليدوي وقم بالارسال من رقم عادي \n"
-            f"لا تقبل الدفعات من الموزعين واجهزة الخدمة الذاتية \n\n"
-            f"2. أرسل رقم العملية أو صورة الإشعار بعد الانتهاء"
-        )
-        msg = bot.send_message(
-            message.chat.id,
-            instructions,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-        bot.register_next_step_handler(msg, process_recharge_proof, request_id, code_id, amount)
-    except ValueError:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add('❌ إلغاء العملية')
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ يرجى إدخال مبلغ صحيح بين 1000 و540000 ليرة سورية!",
-            reply_markup=markup
-        )
-        bot.register_next_step_handler(msg, process_recharge_amount)
-    except Exception as e:
-        bot.send_message(
-            message.chat.id,
-            f"❌ حدث خطأ: {str(e)}",
-            reply_markup=main_menu(message.from_user.id)
-        )
-
-def notify_admin_recharge_request(user, request_id, amount, proof_type, proof_content, code):
-    try:
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✅ الموافقة", callback_data=f"approve_recharge_{request_id}"),
-            types.InlineKeyboardButton("❌ الرفض", callback_data=f"reject_recharge_{request_id}")
-        )
-
-        # --- بداية التعديل ---
-        
-        # 1. بناء اسم المستخدم ورابط ملفه الشخصي
-        user_id = user.id
-        # استخدام html.escape لتجنب الأخطاء في الأسماء التي تحتوي رموزاً
-        user_name = html.escape(f"{user.first_name or ''} {user.last_name or ''}".strip())
-        user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
-
-        # 2. تحديث نص الرسالة ليشمل الرابط
-        admin_msg = (
-            f"🔄 طلب تعبئة رصيد جديد\n\n"        
-            f"👤 المستخدم: {user_link}\n" # تم استبدال الآيدي بالرابط
-            f"💰 المبلغ: {amount:,} ل.س\n"
-            f"🔢 كود الشحن: {code}\n"
-            f"📝 نوع الإثبات: {proof_type}\n"
-            f"🆔 رقم الطلب: {request_id}\n"
-        )
-        
-        # --- نهاية التعديل ---
-
-        if proof_type == "صورة":
-            admin_msg += "🖼️ تم إرسال صورة الإشعار"
-            bot.send_photo(
-                ADMIN_ID,
-                proof_content,
-                caption=admin_msg,
-                reply_markup=markup,
-                parse_mode='HTML'  # 3. إضافة parse_mode للسماح بالروابط
-            )
-        else:
-            admin_msg += f"🔢 رقم العملية: {proof_content}"
-            bot.send_message(
-                ADMIN_ID,
-                admin_msg,
-                reply_markup=markup,
-                parse_mode='HTML'  # 3. إضافة parse_mode للسماح بالروابط
-            )
-    except Exception as e:
-        print(f"Error in notify_admin_recharge_request: {str(e)}")
-        bot.send_message(ADMIN_ID, f"⚠️ فشل في إرسال إشعار الطلب #{request_id}")
-
-def process_recharge_proof(message, request_id, code_id, amount):
-    try:
-        if message.text == '❌ إلغاء العملية':
-            safe_db_execute('UPDATE recharge_requests SET status="cancelled" WHERE id=?', (request_id,))
-            bot.send_message(
-                message.chat.id,
-                "تم إلغاء عملية الشحن",
-                reply_markup=main_menu(message.from_user.id)
-            )
-            return
-        active_requests = safe_db_execute('''
-            SELECT COUNT(*) FROM recharge_requests 
-            WHERE user_id=? AND (status='pending' OR status='pending_admin')
-            AND id != ?
-        ''', (message.from_user.id, request_id))
-        if active_requests and active_requests[0][0] > 0:
-            safe_db_execute('UPDATE recharge_requests SET status="cancelled" WHERE id=?', (request_id,))
-            bot.send_message(
-                message.chat.id,
-                "⚠️ لديك طلب تعبئة قيد المعالجة بالفعل.\n"
-                "تم إلغاء الطلب الحالي.",
-                reply_markup=main_menu(message.from_user.id)
-            )
-            return
-        if message.photo:
-            proof_type = "صورة"
-            proof_content = message.photo[-1].file_id
-            transaction_id = None
-        else:
-            proof_type = "رقم العملية"
-            transaction_id = message.text.strip()
-            if not (transaction_id.isdigit() and len(transaction_id) == 12):
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-                markup.add('❌ إلغاء العملية')
-                msg = bot.send_message(
-                    message.chat.id,
-                    "❌ رقم العملية غير صالح! يجب أن يتكون من 12 رقمًا.\n"
-                    "يرجى إدخال رقم العملية الصحيح:",
-                    reply_markup=markup
-                )
-                bot.register_next_step_handler(msg, process_recharge_proof, request_id, code_id, amount)
-                return
-            proof_content = transaction_id
-        safe_db_execute('''
-            UPDATE recharge_requests 
-            SET transaction_id=?, proof_type=?, proof_content=?, status="pending_admin" 
-            WHERE id=?
-        ''', (transaction_id, proof_type, proof_content, request_id))
-        code_info = safe_db_execute('SELECT code FROM recharge_codes WHERE id=?', (code_id,))
-        if code_info:
-            code = code_info[0][0]
-            notify_admin_recharge_request(message.from_user, request_id, amount, proof_type, proof_content, code)
-        else:
-            raise Exception("كود الشحن غير موجود")
-        
-        bot.send_message(
-            message.chat.id,
-            f"✅ تم استلام طلبك بنجاح!\n\n"
-            f"💰 المبلغ: {amount} ل.س\n"
-            f"📝 نوع الإثبات: {proof_type}\n\n"
-            f"سيتم مراجعة الطلب من قبل الإدارة",
-            reply_markup=main_menu(message.from_user.id)
-        )
-    except Exception as e:
-        safe_db_execute('UPDATE recharge_requests SET status="failed" WHERE id=?', (request_id,))
-        bot.send_message(
-            message.chat.id,
-            "❌ حدث خطأ أثناء معالجة طلبك. يرجى المحاولة لاحقًا.",
-            reply_markup=main_menu(message.from_user.id)
-        )
-
-def update_recharge_message(message):
-    try:
-        new_message = message.text.strip()
-        safe_db_execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
-                       ('recharge_message', new_message))
-        bot.send_message(message.chat.id, "✅ تم تحديث رسالة إعادة الشحن بنجاح!")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 
 
 # ============= وظائف الإدارة =============
@@ -4298,7 +4527,7 @@ def handle_purchase(message, product_id, quantity): # هذه الدالة لم �
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ غير متوقع: {str(e)}")
 
-def show_admin_panel(message):
+def show_admin_panel(message, is_edit=False):
     markup = types.InlineKeyboardMarkup()
     markup.row(
         types.InlineKeyboardButton('تعديل سعر الصرف', callback_data='edit_exchange_rate'),
@@ -4318,7 +4547,7 @@ def show_admin_panel(message):
     )
     markup.row(
         types.InlineKeyboardButton('إدارة العمليات اليدوية', callback_data='manage_manual'),
-        types.InlineKeyboardButton('إدارة أكواد الشحن', callback_data='manage_recharge_codes')
+        types.InlineKeyboardButton('إدارة طرق الدفع 💳', callback_data='manage_payment_methods')
     )
     markup.row(
         types.InlineKeyboardButton('📦 نسخ احتياطي', callback_data='backup_db'),
@@ -4327,8 +4556,24 @@ def show_admin_panel(message):
     markup.row(
         types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot')
     )
-    bot.send_message(message.chat.id, "⚙️ لوحة التحكم الإدارية:", reply_markup=markup)
 
+    text_content = "⚙️ لوحة التحكم الإدارية:"
+    if is_edit:
+        # إذا طُلب التعديل، نستخدم edit_message_text
+        try:
+            bot.edit_message_text(
+                text_content,
+                message.chat.id,
+                message.message_id,
+                reply_markup=markup
+            )
+        except Exception as e:
+            print(f"Failed to edit message for admin panel, sending new one: {e}")
+            # في حال فشل التعديل (مثلاً الرسالة قديمة)، نرسل رسالة جديدة كخيار احتياطي
+            bot.send_message(message.chat.id, text_content, reply_markup=markup)
+    else:
+        # السلوك الافتراضي: إرسال رسالة جديدة
+        bot.send_message(message.chat.id, text_content, reply_markup=markup)
 
 # ============= تشغيل البوت =============
 if __name__ == '__main__':
