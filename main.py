@@ -8,6 +8,7 @@ import shutil
 import uuid
 import threading
 import html
+import math
 from telebot import types
 from datetime import datetime
 from threading import Lock
@@ -37,7 +38,7 @@ FREE_FIRE_NEW_PRODUCTS = {
 FREE_FIRE2_PRODUCTS = []
 PUBG_OFFERS = []
 LAST_PUBG_UPDATE = None
-PUBG_UPDATE_INTERVAL = 900  # 15 دقيقة بالثواني
+PUBG_UPDATE_INTERVAL = 900  
 PUBG_MANUAL_CATEGORY_ID = 20
 FREE_FIRE_MANUAL_CATEGORY_ID = 13
 
@@ -378,6 +379,7 @@ def restore_database(call):
         bot.answer_callback_query(call.id, f"❌ خطأ: {str(e)}")
 
 def process_restore(message):
+    if check_for_start_command(message): return
     try:
         if not message.document or not message.document.file_name.endswith('.db'):
             bot.send_message(message.chat.id, "❌ ملف غير صالح! يجب أن يكون بصيغة .db")
@@ -426,7 +428,13 @@ def is_admin(user_id):
     except Exception as e:
         print(f"Error checking admin status: {str(e)}")
         return user_id == ADMIN_ID
+def check_for_start_command(message):
 
+    if message.text and message.text.strip() == '/start':
+        # استدعاء send_welcome سيقوم بإلغاء أي خطوة سابقة وعرض القائمة الرئيسية
+        send_welcome(message)
+        return True
+    return False
 def get_notification_channel():
     try:
         result = safe_db_execute("SELECT value FROM bot_settings WHERE key='channel_id'")
@@ -545,6 +553,7 @@ def update_freefire2_products():
 #update_freefire2_products() # لا تستدعيها هنا، دعها تحدث عند الحاجة أو في خيط منفصل
 
 def process_product_name_update(message, product_id):
+    if check_for_start_command(message): return
     new_name = message.text.strip()
     if not new_name:
         bot.send_message(message.chat.id, "❌ الاسم لا يمكن أن يكون فارغًا!")
@@ -782,15 +791,20 @@ def main_menu(user_id):
 # ============= معالجة الأحداث =============
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    if is_bot_paused() and not is_admin(message.from_user.id):
+    
+    bot.clear_step_handler_by_chat_id(chat_id=message.chat.id)
+    user_id = message.from_user.id
+    user_processing_lock[user_id] = False
+
+    if is_bot_paused() and not is_admin(user_id):
         bot.send_message(message.chat.id, "⏸️ البوت متوقف مؤقتًا.")
         return
-    user_id = message.from_user.id
-    update_balance(user_id, 0)
-    bot.send_message(message.chat.id, "مرحبا بكم في متجر GG STORE !", reply_markup=main_menu(user_id))
 
+    update_balance(user_id, 0)
+    bot.send_message(message.chat.id, "مرحبا بكم في متجر GG STORE!", reply_markup=main_menu(user_id))
 @bot.message_handler(commands=['broadcast'])
 def start_broadcast(message):
+    if check_for_start_command(message): return
     if not is_admin(message.from_user.id):
         return
     msg = bot.send_message(message.chat.id, "📝 أرسل الرسالة التي تريد إذاعتها لجميع المستخدمين:")
@@ -916,6 +930,55 @@ def clean_pending_recharges(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ حدث خطأ: {str(e)}")
 
+@bot.callback_query_handler(func=lambda call: call.data == 'manage_settings' and is_admin(call.from_user.id))
+def show_settings_management(call):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("إدارة الأزرار الرئيسية", callback_data='manage_buttons'))
+    markup.add(types.InlineKeyboardButton("إدارة أزرار الخدمات", callback_data='manage_sub_buttons'))
+    markup.add(types.InlineKeyboardButton("إدارة الفئات (أكواد وبطاقات)", callback_data='manage_categories'))
+    markup.add(types.InlineKeyboardButton("تعديل سعر الصرف (للمنتجات)", callback_data='show_exchange_rate'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
+
+    bot.edit_message_text(
+        "⚙️ إدارة الأزرار والإعدادات العامة:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+@bot.callback_query_handler(func=lambda call: call.data == 'show_exchange_rate' and is_admin(call.from_user.id))
+def show_exchange_rate_menu(call):
+    current_rate = get_exchange_rate()
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✏️ تغيير السعر", callback_data='change_exchange_rate'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='manage_settings'))
+
+    bot.edit_message_text(
+        f"سعر الصرف الحالي (للمنتجات): **{current_rate}** ل.س/دولار",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+def process_exchange_rate_update(message):
+    if check_for_start_command(message): return
+    try:
+        new_rate = int(message.text)
+        if new_rate <= 0:
+            bot.send_message(message.chat.id, "❌ يجب أن يكون السعر أكبر من صفر.")
+            return
+
+        safe_db_execute("INSERT INTO exchange_rate (rate, updated_at) VALUES (?, ?)",
+                        (new_rate, datetime.now()))
+        bot.send_message(message.chat.id, f"✅ تم تحديث سعر الصرف إلى {new_rate} ليرة/دولار")
+
+        # العودة إلى قائمة الإعدادات بعد التحديث
+        temp_call = types.CallbackQuery(id=0, from_user=message.from_user, data='manage_settings', chat_instance=0, json_string="")
+        temp_call.message = message 
+        show_settings_management(temp_call)
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ: {str(e)}")
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'manage_buttons' and is_admin(call.from_user.id))
 def handle_manage_buttons(call):
@@ -1016,6 +1079,7 @@ def handle_set_channel(call):
     bot.register_next_step_handler(msg, process_set_channel)
 
 def process_set_channel(message):
+    if check_for_start_command(message): return
     try:
         channel_id = message.text.strip()
         if not (channel_id.startswith('@') or channel_id.lstrip('-').isdigit()):
@@ -1056,6 +1120,7 @@ def handle_add_admin(call):
     bot.register_next_step_handler(msg, process_add_admin)
 
 def process_add_admin(message):
+    if check_for_start_command(message): return
     try:
         new_admin_id = int(message.text)
         if is_admin(new_admin_id):
@@ -1242,6 +1307,7 @@ def handle_foreign_currency_address_selection(call):
     bot.register_next_step_handler(msg, process_foreign_currency_amount, address_id)
 
 def process_foreign_currency_amount(message, address_id):
+    if check_for_start_command(message): return 
     if message.text == '❌ إلغاء العملية':
         bot.send_message(message.chat.id, "تم إلغاء العملية.", reply_markup=main_menu(message.from_user.id))
         return
@@ -1250,28 +1316,22 @@ def process_foreign_currency_amount(message, address_id):
         if amount_syp <= 0:
             raise ValueError("المبلغ يجب أن يكون أكبر من صفر")
 
-        # ================== إضافة جديدة للتحقق من الحد الأدنى ==================
-        # 1. نحصل على method_id من address_id
         method_id_query = safe_db_execute("SELECT method_id FROM payment_addresses WHERE id=?", (address_id,))
         if not method_id_query:
             bot.send_message(message.chat.id, "❌ خطأ: لم يتم العثور على طريقة الدفع.")
             return
         method_id = method_id_query[0][0]
 
-        # 2. نحصل على الحد الأدنى من طريقة الدفع
         min_amount_query = safe_db_execute("SELECT min_amount FROM payment_methods WHERE id=?", (method_id,))
         min_amount = min_amount_query[0][0] if min_amount_query else 0
 
-        # 3. نقارن المبلغ بالحد الأدنى
         if min_amount and amount_syp < min_amount:
             bot.send_message(message.chat.id, f"❌ المبلغ الذي أدخلته أقل من الحد الأدنى المسموح به لهذه الطريقة وهو: {min_amount:,} ل.س")
-            # نطلب من المستخدم إدخال المبلغ مرة أخرى
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
             markup.add('❌ إلغاء العملية')
             msg = bot.send_message(message.chat.id, "يرجى إدخال مبلغ صحيح بالليرة السورية:", reply_markup=markup)
             bot.register_next_step_handler(msg, process_foreign_currency_amount, address_id)
-            return # نوقف تنفيذ الدالة هنا
-        # ===================================================================
+            return
 
         address_info = safe_db_execute(
             "SELECT address, currency, exchange_rate FROM payment_addresses WHERE id=?",
@@ -1279,21 +1339,21 @@ def process_foreign_currency_amount(message, address_id):
         )[0]
         address, currency, rate = address_info
 
-        # **هنا يتم حساب المبلغ بالعملة الأجنبية**
-        foreign_amount = round(amount_syp / rate, 4)
+        # ================== تعديل طريقة الحساب هنا ==================
+        # يتم ضرب المبلغ بـ 100، تقريبه للأعلى، ثم قسمته على 100
+        foreign_amount = math.ceil((amount_syp / rate) * 100) / 100
+        # =======================================================
 
-        # إنشاء طلب مبدئي
         safe_db_execute(
             "INSERT INTO recharge_requests (user_id, amount_syp, address_id, status) VALUES (?, ?, ?, 'pending')",
             (message.from_user.id, amount_syp, address_id)
         )
         request_id = safe_db_execute("SELECT last_insert_rowid()")[0][0]
 
-        # عرض التعليمات النهائية للمستخدم
         final_instructions = (
             f"لإضافة `{amount_syp:,}` ل.س إلى رصيدك،\n"
-            f"الرجاء إرسال مبلغ  **`{foreign_amount}` {currency}**\n"
-            f"إلى العنوان التالي:\n\n`{address}`\n\n"
+            f"الرجاء إرسال مبلغ **`{foreign_amount}` {currency}**\n"
+            f"إلى العنوان التالي:\n`{address}`\n\n"
             f"⚠️ **بعد التحويل، أرسل صورة الإشعار أو معرف العملية (TxID) هنا.**"
         )
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1309,7 +1369,10 @@ def process_foreign_currency_amount(message, address_id):
 
 # 3. المستخدم يدخل المبلغ
 def process_recharge_amount(message, method_id):
+    if check_for_start_command(message): 
+        return 
     if message.text == '❌ إلغاء العملية':
+
         bot.send_message(message.chat.id, "تم إلغاء العملية.", reply_markup=main_menu(message.from_user.id))
         return
     try:
@@ -1380,7 +1443,9 @@ def process_recharge_amount(message, method_id):
         bot.send_message(message.chat.id, f"❌ حدث خطأ فادح: {e}")
 # 4. المستخدم يرسل إثبات الدفع
 def process_recharge_proof(message, request_id, address_id, amount_syp):
+    if message.text and check_for_start_command(message): return
     if message.text == '❌ إلغاء العملية':
+
         safe_db_execute("UPDATE recharge_requests SET status='cancelled' WHERE id=?", (request_id,))
         bot.send_message(message.chat.id, "تم إلغاء الطلب.", reply_markup=main_menu(message.from_user.id))
         return
@@ -1392,8 +1457,27 @@ def process_recharge_proof(message, request_id, address_id, amount_syp):
             proof_content = message.photo[-1].file_id
         elif message.text:
             proof_type = "رقم العملية"
-            proof_content = message.text.strip()
-            transaction_id = proof_content
+            transaction_id = message.text.strip()
+            
+            # ================== منطق التحقق الجديد ==================
+            is_valid_id = False
+            if transaction_id.isdigit():
+                if len(transaction_id) == 12 and transaction_id.startswith('6'):
+                    is_valid_id = True
+                elif len(transaction_id) == 10 and transaction_id.startswith('09'):
+                    is_valid_id = True
+
+            if not is_valid_id:
+                # إذا كان الرقم غير صالح، نطلب من المستخدم إعادة المحاولة
+                msg = bot.send_message(
+                    message.chat.id,
+                    "❌ رقم العملية غير صالح. يرجى التأكد من إدخال رقم صحيح (يبدأ بـ 6 ومكون من 12 رقم، أو يبدأ بـ 09 ومكون من 10 أرقام) أو إرسال صورة الإشعار.",
+                    reply_markup=types.ReplyKeyboardRemove()
+                )
+                bot.register_next_step_handler(msg, process_recharge_proof, request_id, address_id, amount_syp)
+                return
+            # =======================================================
+            proof_content = transaction_id
         else:
             bot.send_message(message.chat.id, "نوع الإثبات غير مدعوم. أرسل صورة أو نص.")
             bot.register_next_step_handler(message, process_recharge_proof, request_id, address_id, amount_syp)
@@ -1557,6 +1641,7 @@ def handle_freefire2_offer_selection(call):
         user_processing_lock[user_id] = False # تأكد من تحرير القفل
 
 def process_freefire2_purchase(message, product):
+    if check_for_start_command(message): return
     user_id = message.from_user.id
     try:
         player_id = message.text.strip()
@@ -1822,6 +1907,7 @@ def edit_product_name(call):
     bot.register_next_step_handler(msg, process_edit_product_name, call, product_id)
 
 def process_edit_product_name(message, call, product_id):
+    if check_for_start_command(message): return
     new_name = message.text.strip()
     if not new_name:
         bot.send_message(message.chat.id, "❌ الاسم لا يمكن أن يكون فارغاً")
@@ -1840,6 +1926,7 @@ def handle_search_balance(call):
     bot.register_next_step_handler(msg, process_user_search)
 
 def process_user_search(message):
+    if check_for_start_command(message): return
     try:
         search_term = message.text.strip()
         if search_term.isdigit():
@@ -1888,18 +1975,20 @@ def handle_total_balances(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == 'user_management')
 def handle_user_management(call):
-    markup = types.InlineKeyboardMarkup()
-    markup.row(
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
         types.InlineKeyboardButton('بحث بالآيدي', callback_data='search_by_id'),
         types.InlineKeyboardButton('بحث بالاسم', callback_data='search_by_name'))
-    markup.row(
-        types.InlineKeyboardButton('إجمالي أرصدة المستخدمين', callback_data='total_balances'),
-        types.InlineKeyboardButton('خصم من المستخدم', callback_data='deduct_balance'))
-    markup.row(
-        types.InlineKeyboardButton('تعديل رصيد مستخدم', callback_data='edit_balance'),
-        types.InlineKeyboardButton('رجوع', callback_data='admin_panel'))
+    markup.add(
+        types.InlineKeyboardButton('إجمالي الأرصدة', callback_data='total_balances'),
+        types.InlineKeyboardButton('خصم من الرصيد', callback_data='deduct_balance'))
+    markup.add(types.InlineKeyboardButton('تعديل الرصيد', callback_data='edit_balance'))
+
+    # === نقل زر إدارة المشرفين إلى هنا ===
+    markup.add(types.InlineKeyboardButton('إدارة المشرفين', callback_data='manage_admins'))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel'))
     bot.edit_message_text(
-        "إدارة المستخدمين:",
+        "إدارة المستخدمين والمشرفين:",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=markup
@@ -1942,6 +2031,7 @@ def handle_advanced_search(call):
         bot.register_next_step_handler(msg, process_name_search)
 
 def process_id_search(message):
+    if check_for_start_command(message): return
     try:
         user_id = int(message.text)
         result = safe_db_execute(
@@ -1960,6 +2050,7 @@ def process_id_search(message):
         bot.send_message(message.chat.id, "⚠️ يرجى إدخال رقم صحيح")
 
 def process_name_search(message):
+    if check_for_start_command(message): return
     try:
         name = message.text.strip()
         results = safe_db_execute(
@@ -1986,6 +2077,7 @@ def edit_product_price(call):
     bot.register_next_step_handler(msg, process_edit_product_price, call, product_id)
 
 def process_edit_product_price(message, call, product_id):
+    if check_for_start_command(message): return
     try:
         new_price = float(message.text)
         if new_price <= 0:
@@ -2010,6 +2102,7 @@ def edit_product_description(call):
     bot.register_next_step_handler(msg, process_edit_product_description, product_id)
 
 def process_edit_product_description(message, product_id):
+    if check_for_start_command(message): return
     new_desc = None if message.text == '⏭ حذف الوصف' else message.text
     safe_db_execute("UPDATE manual_products SET description=? WHERE id=?", (new_desc, product_id))
     if new_desc is None:
@@ -2232,6 +2325,7 @@ def handle_new_freefire_offer(call):
         user_processing_lock[user_id] = False # تحرير القفل
 
 def process_new_freefire_purchase(message, product):
+    if check_for_start_command(message): return
     user_id = message.from_user.id
     try:
         player_id = message.text.strip()
@@ -2594,6 +2688,7 @@ def add_manual_category(call):
     bot.register_next_step_handler(msg, process_new_manual_category)
 
 def process_new_manual_category(message):
+    if check_for_start_command(message): return
     try:
         name = message.text.strip()
         if not name:
@@ -2740,6 +2835,7 @@ def select_category_for_product(call):
     bot.register_next_step_handler(msg, process_product_name, category_id)
 
 def process_product_name(message, category_id):
+    if check_for_start_command(message): return
     try:
         name = message.text.strip()
         if not name:
@@ -2752,6 +2848,7 @@ def process_product_name(message, category_id):
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 
 def process_product_price(message, category_id, name):
+    if check_for_start_command(message): return
     try:
         if message.text == '⏭ تخطي الوصف':
             skip_product_description(message, category_id, name, 0)
@@ -2793,6 +2890,7 @@ def send_rejection_notification(user_id, order_id, reason, refund_amount):
         print(f"فشل في إرسال إشعار الرفض: {str(e)}")
 
 def process_product_description(message, category_id, name, price):
+    if check_for_start_command(message): return
     if message.text == '⏭ تخطي الوصف':
         description = None
     else:
@@ -3110,6 +3208,7 @@ def handle_manual_purchase(call):
         user_processing_lock[user_id] = False # تحرير القفل
 
 def process_player_id_for_manual_purchase(message, product_id, price_usd, user_id):
+    if check_for_start_command(message): return
     player_id = message.text.strip()
     if not player_id:
         bot.send_message(message.chat.id, "❌ يجب إدخال معرف اللاعب")
@@ -3137,6 +3236,7 @@ def process_player_id_for_manual_purchase(message, product_id, price_usd, user_i
     user_processing_lock[user_id] = False
 
 def process_manual_quantity_purchase(message, product_id, price_usd, user_id):
+    if check_for_start_command(message): return
     try:
         quantity = int(message.text.strip())
         if quantity <= 0:
@@ -3391,6 +3491,7 @@ def handle_complete_with_message(call):
     )
 
 def process_custom_message(message, order_id, admin_id, admin_msg_id):
+    if check_for_start_command(message): return
     try:
         custom_message = None if message.text == '/skip' else message.text
         success = log_order_status_update(order_id, 'completed', admin_id, "تمت الموافقة من الأدمن")
@@ -3437,6 +3538,7 @@ def process_custom_message(message, order_id, admin_id, admin_msg_id):
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 
 def process_completion_message(message, order_id, admin_id, admin_msg_id):
+    if check_for_start_command(message): return
     try:
         custom_message = None if message.text == '/skip' else message.text
         success = log_order_status_update(order_id, 'completed', admin_id, "تمت الموافقة من الأدمن")
@@ -3491,6 +3593,7 @@ def reject_order(call):
     bot.register_next_step_handler(msg, process_reject_reason, order_id, call.from_user.id, call.message.message_id)
 
 def process_reject_reason(message, order_id, admin_id, admin_message_id):
+    if check_for_start_command(message): return
     try:
         reason = message.text if message.text else "لا يوجد سبب محدد"
         success = log_order_status_update(order_id, 'rejected', admin_id, reason)
@@ -3707,6 +3810,7 @@ def search_order(call):
     bot.register_next_step_handler(msg, process_order_search)
 
 def process_order_search(message):
+    if check_for_start_command(message): return
     search_term = message.text.strip()
     if not search_term:
         bot.send_message(message.chat.id, "❌ يرجى إدخال مصطلح البحث")
@@ -3825,6 +3929,7 @@ def process_add_method_type(call):
     bot.register_next_step_handler(msg, process_add_method_name, method_type)
 
 def process_add_method_name(message, method_type):
+    if check_for_start_command(message): return
     try:
         name = message.text.strip()
         instructions = "يرجى اتباع التعليمات لإتمام عملية الدفع." # يمكنك تغييرها لاحقاً
@@ -3939,6 +4044,7 @@ def edit_method_min_amount(call):
     bot.register_next_step_handler(msg, process_new_min_amount, method_id)
 
 def process_new_min_amount(message, method_id):
+    if check_for_start_command(message): return
     try:
         min_amount = int(message.text.strip())
         if min_amount < 0:
@@ -3971,6 +4077,7 @@ def add_address_to_method(call):
     bot.register_next_step_handler(msg, process_add_address_text, method_id)
 
 def process_add_address_text(message, method_id):
+    if check_for_start_command(message): return
     address = message.text.strip()
     method_type = safe_db_execute("SELECT type FROM payment_methods WHERE id=?", (method_id,))[0][0]
     
@@ -3986,6 +4093,7 @@ def process_add_address_text(message, method_id):
         bot.send_message(message.chat.id, "✅ تم إضافة العنوان بنجاح.")
 
 def process_add_address_limit(message, method_id, address):
+    if check_for_start_command(message): return
     try:
         limit = int(message.text.strip())
         safe_db_execute(
@@ -3999,6 +4107,7 @@ def process_add_address_limit(message, method_id, address):
         bot.send_message(message.chat.id, f"❌ خطأ: {e}")
 
 def process_add_address_currency(message, method_id, address):
+    if check_for_start_command(message): return
     try:
         parts = message.text.split()
         currency = parts[0].upper()
@@ -4077,6 +4186,7 @@ def edit_address_limit(call):
     bot.register_next_step_handler(msg, process_new_limit, address_id)
 
 def process_new_limit(message, address_id):
+    if check_for_start_command(message): return # <-- إضافة هنا
     try:
         new_limit = int(message.text.strip())
         if new_limit < 0:
@@ -4126,6 +4236,7 @@ def edit_address_rate(call):
     bot.register_next_step_handler(msg, process_new_rate, address_id)
 
 def process_new_rate(message, address_id):
+    if check_for_start_command(message): return # <-- إضافة هنا
     try:
         new_rate = float(message.text.strip())
         if new_rate <= 0:
@@ -4197,6 +4308,15 @@ def toggle_recharge_feature(call):
     status = "⏸️ تم تعطيل خدمة إعادة الشحن" if new_value == '1' else "✅ تم تفعيل خدمة إعادة الشحن"
     
     bot.answer_callback_query(call.id, status)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'change_exchange_rate' and is_admin(call.from_user.id))
+def handle_change_exchange_rate(call):
+    msg = bot.send_message(
+        call.message.chat.id, 
+        "أرسل سعر الصرف الجديد:",
+        reply_markup=types.ForceReply(selective=True)
+    )
+    bot.register_next_step_handler(msg, process_exchange_rate_update)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -4373,6 +4493,7 @@ def show_products(message, category_id):
         bot.send_message(message.chat.id, "المنتجات المتاحة حالياً :", reply_markup=markup)
 
 def process_balance_deduction(message):
+    if check_for_start_command(message): return
     try:
         parts = message.text.split()
         if len(parts) != 2:
@@ -4420,6 +4541,7 @@ def show_categories(message):
         bot.send_message(message.chat.id, "اختر فئة:", reply_markup=markup)
 
 def process_purchase_quantity(message, product_id):
+    if check_for_start_command(message): return
     user_id = message.from_user.id
     if user_processing_lock.get(user_id, False):
         bot.send_message(message.chat.id, "لديك عملية قيد المعالجة بالفعل. الرجاء الانتظار.")
@@ -4494,6 +4616,7 @@ def show_product_details(message, product_id):
         bot.send_message(message.chat.id, text, reply_markup=markup)
 
 def process_recharge_code_update(message):
+    if check_for_start_command(message): return
     try:
         if message.text == '❌ إلغاء ❌':
             bot.send_message(
@@ -4524,6 +4647,7 @@ def process_recharge_code_update(message):
 
 # ============= وظائف الإدارة =============
 def process_balance_update(message):
+    if check_for_start_command(message): return
     try:
         parts = message.text.split()
         if len(parts) != 2:
@@ -4544,16 +4668,6 @@ def process_balance_update(message):
         bot.send_message(message.chat.id, "❌ يرجى إدخال رقم صحيح!")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطأ: {str(e)}")
-
-def process_exchange_rate_update(message):
-    try:
-        new_rate = int(message.text)
-        safe_db_execute("INSERT INTO exchange_rate (rate, updated_at) VALUES (?, ?)",
-                        (new_rate, datetime.now()))
-        bot.send_message(message.chat.id, f"✅ تم تحديث سعر الصرف إلى {new_rate} ليرة/دولار")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ خطأ: {str(e)}")
-
 def toggle_bot_status(message):
     current_status = is_bot_paused()
     new_status = '0' if current_status else '1'
@@ -4587,6 +4701,7 @@ def toggle_category_status(message, category_id):
 
 # ============= معالجة الشراء =============
 def process_topup_purchase(message, offer):
+    if check_for_start_command(message): return
     user_id = message.from_user.id
     try:
         player_id = message.text.strip()
@@ -4652,51 +4767,34 @@ def handle_purchase(message, product_id, quantity): # هذه الدالة لم �
         bot.send_message(message.chat.id, f"❌ حدث خطأ غير متوقع: {str(e)}")
 
 def show_admin_panel(message, is_edit=False):
-    markup = types.InlineKeyboardMarkup()
-    markup.row(
-        types.InlineKeyboardButton('تعديل سعر الصرف', callback_data='edit_exchange_rate'),
-        types.InlineKeyboardButton("إدارة الأزرار الرئيسية", callback_data='manage_buttons') # تم تعديل الاسم للتمييز
-    )
-    # زر جديد لإدارة الأزرار الفرعية
-    markup.row(
-        types.InlineKeyboardButton("إدارة أزرار الخدمات", callback_data='manage_sub_buttons')
-    )
-    markup.row(
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
         types.InlineKeyboardButton('إدارة المستخدمين', callback_data='user_management'),
-        types.InlineKeyboardButton('إدارة المشرفين', callback_data='manage_admins')
-    )
-    markup.row(
-        types.InlineKeyboardButton('إدارة القناة', callback_data='manage_channel'),
-        types.InlineKeyboardButton('إدارة الفئات', callback_data='manage_categories')
-    )
-    markup.row(
-        types.InlineKeyboardButton('إدارة العمليات اليدوية', callback_data='manage_manual'),
         types.InlineKeyboardButton('إدارة طرق الدفع 💳', callback_data='manage_payment_methods')
     )
-    markup.row(
+    markup.add(
+        types.InlineKeyboardButton('إدارة العمليات اليدوية', callback_data='manage_manual'),
+        types.InlineKeyboardButton('إدارة القناة', callback_data='manage_channel')
+    )
+    # === الزر المجمع الجديد ===
+    markup.add(types.InlineKeyboardButton("⚙️ إدارة الأزرار والإعدادات", callback_data='manage_settings'))
+
+    markup.add(
         types.InlineKeyboardButton('📦 نسخ احتياطي', callback_data='backup_db'),
         types.InlineKeyboardButton('🔄 استعادة', callback_data='restore_db')
     )
-    markup.row(
-        types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot')
-    )
+    markup.add(types.InlineKeyboardButton('إيقاف/تشغيل البوت', callback_data='toggle_bot'))
 
     text_content = "⚙️ لوحة التحكم الإدارية:"
+
     if is_edit:
-        # إذا طُلب التعديل، نستخدم edit_message_text
         try:
             bot.edit_message_text(
-                text_content,
-                message.chat.id,
-                message.message_id,
-                reply_markup=markup
+                text_content, message.chat.id, message.message_id, reply_markup=markup
             )
         except Exception as e:
-            print(f"Failed to edit message for admin panel, sending new one: {e}")
-            # في حال فشل التعديل (مثلاً الرسالة قديمة)، نرسل رسالة جديدة كخيار احتياطي
             bot.send_message(message.chat.id, text_content, reply_markup=markup)
     else:
-        # السلوك الافتراضي: إرسال رسالة جديدة
         bot.send_message(message.chat.id, text_content, reply_markup=markup)
 
 # ============= تشغيل البوت =============
