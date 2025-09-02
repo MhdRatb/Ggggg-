@@ -536,8 +536,7 @@ def get_product_details(product_id):
         if 'product' not in data:
             raise ValueError("استجابة API غير صالحة")
         product = data['product']
-        # تأكد أن التحويل يتم بعد استلام السعر الأصلي
-        product['unit_price_syp'] = convert_to_syp(product['unit_price'])
+        # --- تم حذف سطر تحويل السعر من هنا ---
         return product
     except requests.exceptions.RequestException as e:
         print(f"Error fetching product: {str(e)}")
@@ -3540,15 +3539,25 @@ def complete_order(call):
             # إرسال إشعار للمستخدم
             notify_user_of_status_change(user_id, order_id, 'completed')
 
-            # إرسال إشعار للقناة
+            # --- بداية التعديل المطلوب ---
+            # 1. جلب بيانات المستخدم الكاملة من قاعدة البيانات بدلاً من استخدام بيانات الأدمن
+            try:
+                user_info = bot.get_chat(user_id)
+            except Exception as e:
+                print(f"Could not fetch user info for {user_id}: {e}")
+                # في حال فشل جلب بيانات المستخدم، نستخدم بيانات الأدمن كحل بديل مؤقت
+                user_info = call.from_user
+
+            # 2. إرسال إشعار للقناة باستخدام بيانات المستخدم الصحيحة
             send_completion_notification_to_channel(
                 order_id=order_id,
-                user=call.from_user, 
+                user=user_info, # استخدام user_info بدلاً من call.from_user
                 product_name=product_name,
                 price=price,
                 order_type_text="منتج يدوي",
                 player_id=player_id
             )
+            # --- نهاية التعديل المطلوب ---
 
             try:
                 new_text = (
@@ -4460,30 +4469,27 @@ def handle_callback(call):
         product_id = data.split('_')[1]
         show_product_details(call.message, product_id)
     elif data.startswith('buy_'):
-        # ====== تعديل سلوك زر الشراء لـ G2BULK API ======
-        product_id = data.split('_')[1]
-        product = get_product_details(product_id) # جلب تفاصيل المنتج
-        if not product:
-            bot.answer_callback_query(call.id, "❌ المنتج غير متوفر!")
-            return
-        
-        # تعديل الرسالة لإظهار التفاصيل وطلب الكمية
-        updated_text = (
-            f"🛒 المنتج: {product['title']}\n"
-            f"💵 السعر: {product['unit_price_syp']:,} ل.س\n" # استخدام السعر المحول
-            f"📦 المخزون: {product['stock']}\n\n"
-        )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=updated_text,
-            reply_markup=None # إخفاء زر الشراء
-        )
-        # تسجيل next_step_handler بعد تعديل الرسالة
-        msg = bot.send_message(call.message.chat.id, "⏳ الرجاء إدخال الكمية المطلوبة:") # إرسال رسالة منفصلة لطلب الكمية
-        bot.register_next_step_handler(msg, process_purchase_quantity, product_id)
-    # ===============================================
+            product_id = data.split('_')[1]
+            product = get_product_details(product_id) # جلب تفاصيل المنتج
+            if not product:
+                bot.answer_callback_query(call.id, "❌ المنتج غير متوفر!")
+                return
 
+            price_syp = convert_to_syp(product['unit_price'], user_id=call.from_user.id)
+
+            updated_text = (
+                f"🛒 المنتج: {product['title']}\n"
+                f"💵 السعر: {price_syp:,} ل.س\n"
+                f"📦 المخزون: {product['stock']}\n\n"
+            )
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=updated_text,
+                reply_markup=None 
+            )
+            msg = bot.send_message(call.message.chat.id, "⏳ الرجاء إدخال الكمية المطلوبة:") # إرسال رسالة منفصلة لطلب الكمية
+            bot.register_next_step_handler(msg, process_purchase_quantity, product_id)
     elif data == 'edit_balance' and is_admin(user_id):
         msg = bot.send_message(call.message.chat.id, "أرسل آيدي المستخدم والمبلغ (مثال: 123456789 50000):")
         bot.register_next_step_handler(msg, process_balance_update)
@@ -4601,7 +4607,7 @@ def show_products(message, category_id):
         markup = types.InlineKeyboardMarkup()
         for prod in products:
             if prod['stock'] > 0:
-                price_syp = convert_to_syp(prod['unit_price'])
+                price_syp = convert_to_syp(prod['unit_price'], user_id=message.chat.id)
                 markup.add(types.InlineKeyboardButton(
                     f"{prod['title']} - {price_syp:,} ل.س", # تنسيق السعر
                     callback_data=f'product_{prod["id"]}'
@@ -4673,7 +4679,10 @@ def process_purchase_quantity(message, product_id):
         if not product:
             bot.send_message(message.chat.id, "❌ المنتج غير متوفر!")
             return
-        total_price = product['unit_price_syp'] * quantity # استخدام السعر المحول
+
+        discounted_price_syp = convert_to_syp(product['unit_price'], user_id=user_id)
+        total_price = discounted_price_syp * quantity
+
         if get_balance(user_id) < total_price:
             bot.send_message(message.chat.id, "⚠️ رصيدك غير كافي!")
             return
@@ -4690,7 +4699,6 @@ def process_purchase_quantity(message, product_id):
             order_details = response.json()
             delivery_items = order_details.get("delivery_items", [])
             
-            # تسجيل الطلب
             log_user_order(
                 user_id=user_id,
                 order_type='cards',
@@ -4700,7 +4708,6 @@ def process_purchase_quantity(message, product_id):
                 api_response=order_details
             )
 
-            # إرسال إشعار للقناة
             send_completion_notification_to_channel(
                 order_id=order_details['order_id'],
                 user=message.from_user,
@@ -4710,7 +4717,6 @@ def process_purchase_quantity(message, product_id):
                 delivery_items=delivery_items
             )
             
-            # إرسال الأكواد للمستخدم
             delivery_items_text = "\n".join([f"<code>{item}</code>" for item in delivery_items])
             bot.send_message(
                 message.chat.id,
@@ -4734,15 +4740,19 @@ def process_purchase_quantity(message, product_id):
 def show_product_details(message, product_id):
     product = get_product_details(product_id)
     if product:
+        # --- بداية الإضافة الجديدة ---
+        # نقوم بحساب السعر هنا بعد جلب المنتج
+        price_syp = convert_to_syp(product['unit_price'], user_id=message.chat.id)
+        # --- نهاية الإضافة الجديدة ---
+
         text = f"""
         🛒 المنتج: {product['title']}
-        💵 السعر: {product['unit_price_syp']:,} ل.س
+        💵 السعر: {price_syp:,} ل.س
         📦 المخزون: {product['stock']}
         """
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("شراء 🛒", callback_data=f"buy_{product['id']}"))
         bot.send_message(message.chat.id, text, reply_markup=markup)
-
 def process_recharge_code_update(message):
     if check_for_start_command(message): return
     try:
@@ -4961,7 +4971,7 @@ def show_admin_panel(message, is_edit=False):
     else:
         bot.send_message(message.chat.id, text_content, reply_markup=markup)
 
-# ============= تشغيل البوت =============
+
 if __name__ == '__main__':
     print("Bot is running...")
     bot.infinity_polling()
