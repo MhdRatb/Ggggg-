@@ -232,128 +232,8 @@ if not safe_db_execute("SELECT * FROM bot_settings WHERE key='channel_id'"):
 
 bot = telebot.TeleBot(API_KEY)
 
-def ensure_manual_tables_updated():
-    try:
-        # التحقق من جدول الفئات
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(manual_categories)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'is_active' not in columns:
-            safe_db_execute("ALTER TABLE manual_categories ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
-            print("تمت إضافة العمود is_active إلى جدول manual_categories")
 
-        # التحقق من جدول المنتجات
-        cursor.execute("PRAGMA table_info(manual_products)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'is_active' not in columns:
-            safe_db_execute("ALTER TABLE manual_products ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
-            print("تمت إضافة العمود is_active إلى جدول manual_products")
-
-    except Exception as e:
-        print(f"خطأ في تحديث جداول المنتجات اليدوية: {str(e)}")
-    finally:
-        cursor.close()
-
-ensure_manual_tables_updated()
-def upgrade_database_for_discounts():
-    """
-    يضيف عمود الخصم إلى جدول المستخدمين إذا لم يكن موجودًا.
-    """
-    try:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(users)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'discount' not in columns:
-            safe_db_execute("ALTER TABLE users ADD COLUMN discount INTEGER DEFAULT 0")
-            print("✅ تمت إضافة عمود الخصم (discount) إلى جدول المستخدمين بنجاح.")
-        cursor.close()
-    except Exception as e:
-        print(f"❌ خطأ في ترقية قاعدة البيانات لإضافة الخصومات: {e}")
-
-# استدعِ الدالة عند بدء التشغيل
-upgrade_database_for_discounts()
 # ============= إضافة الدوال للنسخ الاحتياطي والاستعادة =============
-
-def upgrade_database_schema():
-    """
-    تضمن هذه الدالة أن هيكل قاعدة البيانات محدّث.
-    تقوم بإضافة الجداول الجديدة وحذف الجداول القديمة.
-    """
-    print("بدء عملية ترقية بنية قاعدة البيانات...")
-    try:
-        # 1. إضافة الجداول الجديدة إذا لم تكن موجودة
-        safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_methods (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL UNIQUE,
-                        type TEXT NOT NULL,
-                        instructions TEXT,
-                        is_active BOOLEAN DEFAULT TRUE
-                        )''')
-        safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_addresses (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        method_id INTEGER NOT NULL,
-                        address TEXT NOT NULL,
-                        currency TEXT DEFAULT 'SYP',
-                        exchange_rate REAL,
-                        daily_limit INTEGER,
-                        daily_used INTEGER DEFAULT 0,
-                        last_reset_date TEXT,
-                        is_active BOOLEAN DEFAULT TRUE,
-                        FOREIGN KEY(method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
-                        )''')
-        safe_db_execute('''CREATE TABLE IF NOT EXISTS banned_users (
-                        user_id INTEGER PRIMARY KEY,
-                        banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )''')
-
-        # 2. حذف جدول recharge_codes القديم إذا كان موجودًا
-        safe_db_execute("DROP TABLE IF EXISTS recharge_codes")
-        
-        # 3. إعادة إنشاء جدول recharge_requests بالهيكل الصحيح
-        # نحذفه أولاً لضمان عدم وجود تعارض في الأعمدة ثم ننشئه من جديد
-        safe_db_execute("DROP TABLE IF EXISTS recharge_requests")
-        safe_db_execute('''CREATE TABLE IF NOT EXISTS recharge_requests (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL,
-                        amount_syp INTEGER NOT NULL,
-                        address_id INTEGER NOT NULL,
-                        transaction_id TEXT,
-                        proof_type TEXT,
-                        proof_content TEXT,
-                        status TEXT DEFAULT 'pending',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(address_id) REFERENCES payment_addresses(id)
-                    )''')
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(payment_methods)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'min_amount' not in columns:
-            safe_db_execute("ALTER TABLE payment_methods ADD COLUMN min_amount INTEGER DEFAULT 0")
-            print("تمت إضافة عمود min_amount إلى جدول payment_methods")
-        
-        print("✅ تمت ترقية بنية قاعدة البيانات بنجاح.")
-        return True
-    except Exception as e:
-        print(f"❌ فشلت عملية الترقية: {e}")
-        return False
-def ensure_columns_exist():
-    try:
-        columns = safe_db_execute("PRAGMA table_info(recharge_requests)")
-        existing_columns = [col[1] for col in columns]
-        if 'code_id' not in existing_columns:
-            safe_db_execute("ALTER TABLE recharge_requests ADD COLUMN code_id INTEGER")
-            print("تمت إضافة العمود code_id إلى جدول recharge_requests")
-        if 'proof_type' not in existing_columns:
-            safe_db_execute("ALTER TABLE recharge_requests ADD COLUMN proof_type TEXT")
-            print("تمت إضافة العمود proof_type إلى جدول recharge_requests")
-        if 'proof_content' not in existing_columns:
-            safe_db_execute("ALTER TABLE recharge_requests ADD COLUMN proof_content TEXT")
-            print("تمت إضافة العمود proof_content إلى جدول recharge_requests")
-    except Exception as e:
-        print(f"خطأ في التحقق من الأعمدة: {str(e)}")
-
-ensure_columns_exist()
-
 def close_db_connection():
     """إغلاق اتصالات قاعدة البيانات بشكل آمن"""
     global conn
@@ -419,17 +299,9 @@ def process_restore(message):
         global conn
         conn = sqlite3.connect('wallet.db', check_same_thread=False)
         
-        # ================== الخطوة الأهم ==================
-        # 4. استدعاء دالة الترقية لتحديث بنية قاعدة البيانات المستعادة
-        if upgrade_database_schema():
-            bot.send_message(message.chat.id, "✅ تمت استعادة النسخة الاحتياطية وتحديث هيكلها بنجاح!")
-        else:
-            bot.send_message(message.chat.id, "⚠️ تمت استعادة النسخة، لكن ربما حدث خطأ أثناء ترقية الهيكل. يرجى مراجعة السجلات.")
-        if upgrade_database_for_discounts():
-            bot.send_message(message.chat.id, "✅ تمت استعادة النسخة الاحتياطية وتحديث هيكلها بنجاح!")
-        else:
-            bot.send_message(message.chat.id, "⚠️ تمت استعادة النسخة، لكن ربما حدث خطأ أثناء ترقية الهيكل. يرجى مراجعة السجلات.")
-        # ===============================================
+
+        bot.send_message(message.chat.id, "✅ تمت استعادة النسخة الاحتياطية وتحديث هيكلها بنجاح!")
+
 
     except sqlite3.DatabaseError as e:
         bot.send_message(message.chat.id, f"❌ ملف قاعدة بيانات تالف: {str(e)}")
@@ -542,24 +414,6 @@ def skip_product_description(message, category_id, name, price):
         bot.send_message(message.chat.id, f"✅ تمت إضافة المنتج '{name}' بنجاح بدون وصف")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
-
-def ensure_user_orders_columns():
-    required_columns = {
-        'api_response': 'TEXT',
-        'admin_note': 'TEXT'
-    }
-    try:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(user_orders)")
-        existing_columns = {col[1]: col[2] for col in cursor.fetchall()}
-        for col_name, col_type in required_columns.items():
-            if col_name not in existing_columns:
-                print(f"Adding missing column {col_name} to user_orders table")
-                safe_db_execute(f"ALTER TABLE user_orders ADD COLUMN {col_name} {col_type}")
-    except Exception as e:
-        print(f"Error ensuring user_orders columns: {str(e)}")
-
-ensure_user_orders_columns()
 
 def update_freefire2_products():
     global FREE_FIRE2_PRODUCTS
