@@ -13,7 +13,7 @@ from telebot import types
 from datetime import datetime
 from threading import Lock
 from dotenv import load_dotenv
-DB_PATH = '/data/wallet.db'
+DB_PATH = 'wallet.db'
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 ADMIN_ID = 5134156042 # تأكد من أن هذا هو ID الأدمن الخاص بك
@@ -5020,3 +5020,4 @@ def show_admin_panel(message, is_edit=False):
 if __name__ == '__main__':
     print("Bot is running...")
     bot.infinity_polling()
+
