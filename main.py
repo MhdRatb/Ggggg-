@@ -15,7 +15,6 @@ from threading import Lock
 from dotenv import load_dotenv
 
 load_dotenv()
-
 API_KEY = os.getenv("API_KEY")
 ADMIN_ID = 5134156042 # تأكد من أن هذا هو ID الأدمن الخاص بك
 FREE_FIRE_NEW_API_BASE = os.getenv("FREE_FIRE_NEW_API_BASE")
@@ -81,7 +80,15 @@ update_thread.daemon = True
 update_thread.start()
 
 # ============= إعداد قاعدة البيانات =============
-conn = sqlite3.connect('wallet.db', check_same_thread=False)
+if os.name == 'nt': # 'nt' هو الاسم الرمزي لنظام ويندوز
+    # هذا المسار سيعمل عند تشغيل البوت على جهازك المحلي
+    print("Running on Windows, using local DB path.")
+    DB_PATH = 'wallet.db'
+else:
+    # هذا المسار سيعمل عند رفع البوت على الخادم (Railway)
+    print("Running on a non-Windows OS (like Railway), using volume path.")
+    DB_PATH = '/data/wallet.db'
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 db_lock = Lock()
 
 def safe_db_execute(query, params=()):
@@ -176,6 +183,7 @@ safe_db_execute('''CREATE TABLE IF NOT EXISTS payment_methods (
                 name TEXT NOT NULL UNIQUE,
                 type TEXT NOT NULL, -- 'daily_limit_syp', 'unlimited_syp', 'foreign_currency'
                 instructions TEXT, -- رسالة التعليمات التي تظهر للمستخدم
+                min_amount INTEGER DEFAULT 0, -- <<< هذا هو السطر الجديد
                 is_active BOOLEAN DEFAULT TRUE
                 )''')
 
@@ -247,7 +255,7 @@ def backup_database(call):
         close_db_connection()
         backup_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         temp_backup_name = f"temp_backup_{backup_time}.db"
-        shutil.copyfile('wallet.db', temp_backup_name)
+        shutil.copyfile(DB_PATH, temp_backup_name)
         global conn
         conn = sqlite3.connect('wallet.db', check_same_thread=False)
         with open(temp_backup_name, 'rb') as f:
@@ -292,13 +300,32 @@ def process_restore(message):
             f.write(downloaded_file)
         
         # 2. استبدال قاعدة البيانات الحالية بالنسخة الاحتياطية
-        shutil.move(temp_name, 'wallet.db')
+        shutil.move(temp_name, DB_PATH)
         bot.send_message(message.chat.id, "⏳ تم استلام النسخة الاحتياطية، جاري تحديث الهيكل...")
 
         # 3. إعادة الاتصال بقاعدة البيانات الجديدة (المستعادة)
         global conn
         conn = sqlite3.connect('wallet.db', check_same_thread=False)
         
+        # --- بداية الإضافة الجديدة: تنظيف الطلبات المعلقة ---
+        bot.send_message(message.chat.id, "🧹 جاري تنظيف الطلبات المعلقة من النسخة المستعادة...")
+        
+        # أولاً: تنظيف طلبات تعبئة الرصيد المعلقة
+        safe_db_execute("""
+            UPDATE recharge_requests 
+            SET status = 'failed' 
+            WHERE status = 'pending' OR status = 'pending_admin'
+        """)
+        
+        # ثانياً: تنظيف الطلبات اليدوية أو طلبات API المعلقة
+        safe_db_execute("""
+            UPDATE user_orders 
+            SET status = 'failed' 
+            WHERE status = 'pending'
+        """)
+        
+        bot.send_message(message.chat.id, "🧼 تم تنظيف الطلبات المعلقة بنجاح.")
+        # --- نهاية الإضافة الجديدة ---
 
         bot.send_message(message.chat.id, "✅ تمت استعادة النسخة الاحتياطية وتحديث هيكلها بنجاح!")
 
@@ -727,6 +754,14 @@ def send_welcome(message):
     bot.clear_step_handler_by_chat_id(chat_id=message.chat.id)
     user_id = message.from_user.id
     user_processing_lock[user_id] = False
+
+    try:
+        safe_db_execute(
+            "UPDATE recharge_requests SET status='cancelled' WHERE user_id=? AND status='pending'",
+            (user_id,)
+        )
+    except Exception as e:
+        print(f"Error cancelling pending request on /start for user {user_id}: {e}")
 
     if is_bot_paused() and not is_admin(user_id):
         bot.send_message(message.chat.id, "⏸️ البوت متوقف مؤقتًا.")
@@ -1163,11 +1198,18 @@ def handle_recharge_request(message):
 # 2. المستخدم يختار طريقة الدفع
 @bot.callback_query_handler(func=lambda call: call.data.startswith('select_method_'))
 def handle_payment_method_selection(call):
+    user_id = call.from_user.id
     try:
+        if user_processing_lock.get(user_id, False):
+            bot.answer_callback_query(call.id, "لديك عملية أخرى قيد التنفيذ، يرجى إكمالها أولاً.", show_alert=True)
+            return
+
+        user_processing_lock[user_id] = True
+
         method_id = int(call.data.split('_')[2])
         
         active_requests_count = safe_db_execute(
-            "SELECT COUNT(*) FROM recharge_requests WHERE user_id=? AND (status='pending_admin')",
+            "SELECT COUNT(*) FROM recharge_requests WHERE user_id=? AND (status='pending' OR status='pending_admin')",
             (call.from_user.id,)
         )[0][0]
 
@@ -1224,7 +1266,7 @@ def handle_payment_method_selection(call):
     except Exception as e:
         print(f"Error in handle_payment_method_selection: {e}")
         bot.answer_callback_query(call.id, "حدث خطأ ما، يرجى المحاولة لاحقًا.", show_alert=True)
-
+        user_processing_lock[user_id] = False
 @bot.callback_query_handler(func=lambda call: call.data.startswith('select_fc_addr_'))
 def handle_foreign_currency_address_selection(call):
     address_id = int(call.data.split('_')[3])
@@ -1243,6 +1285,7 @@ def process_foreign_currency_amount(message, address_id):
     if check_for_start_command(message): return 
     if message.text == '❌ إلغاء العملية':
         bot.send_message(message.chat.id, "تم إلغاء العملية.", reply_markup=main_menu(message.from_user.id))
+        user_processing_lock[message.from_user.id] = False 
         return
     try:
         amount_syp = int(message.text.strip())
@@ -1305,8 +1348,8 @@ def process_recharge_amount(message, method_id):
     if check_for_start_command(message): 
         return 
     if message.text == '❌ إلغاء العملية':
-
         bot.send_message(message.chat.id, "تم إلغاء العملية.", reply_markup=main_menu(message.from_user.id))
+        user_processing_lock[message.from_user.id] = False # فك القفل
         return
     try:
         amount_syp = int(message.text.strip())
@@ -1376,11 +1419,12 @@ def process_recharge_amount(message, method_id):
         bot.send_message(message.chat.id, f"❌ حدث خطأ فادح: {e}")
 # 4. المستخدم يرسل إثبات الدفع
 def process_recharge_proof(message, request_id, address_id, amount_syp):
+    user_id = message.from_user.id
     if message.text and check_for_start_command(message): return
     if message.text == '❌ إلغاء العملية':
-
         safe_db_execute("UPDATE recharge_requests SET status='cancelled' WHERE id=?", (request_id,))
         bot.send_message(message.chat.id, "تم إلغاء الطلب.", reply_markup=main_menu(message.from_user.id))
+        user_processing_lock[user_id] = False # فك القفل عند الإلغاء
         return
         
     try:
@@ -1391,8 +1435,6 @@ def process_recharge_proof(message, request_id, address_id, amount_syp):
         elif message.text:
             proof_type = "رقم العملية"
             transaction_id = message.text.strip()
-            
-            # ================== منطق التحقق الجديد ==================
             is_valid_id = False
             if transaction_id.startswith('0x') and len(transaction_id) > 42:
                 is_valid_id = True
@@ -1403,7 +1445,6 @@ def process_recharge_proof(message, request_id, address_id, amount_syp):
                     is_valid_id = True
 
             if not is_valid_id:
-                # إذا كان الرقم غير صالح، نطلب من المستخدم إعادة المحاولة
                 msg = bot.send_message(
                     message.chat.id,
                     "❌ رقم العملية غير صالح.",
@@ -1411,7 +1452,6 @@ def process_recharge_proof(message, request_id, address_id, amount_syp):
                 )
                 bot.register_next_step_handler(msg, process_recharge_proof, request_id, address_id, amount_syp)
                 return
-            # =======================================================
             proof_content = transaction_id
         else:
             bot.send_message(message.chat.id, "نوع الإثبات غير مدعوم. أرسل صورة أو نص.")
@@ -1426,10 +1466,12 @@ def process_recharge_proof(message, request_id, address_id, amount_syp):
         notify_admin_recharge_request(message.from_user, request_id, amount_syp, proof_type, proof_content, address_id)
         
         bot.send_message(message.chat.id, "✅ تم استلام طلبك بنجاح وهو قيد المراجعة الآن.", reply_markup=main_menu(message.from_user.id))
+        # لاحظ: لم نعد نفك القفل هنا عند النجاح
 
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء معالجة الإثبات: {e}")
         safe_db_execute("UPDATE recharge_requests SET status='failed' WHERE id=?", (request_id,))
+        user_processing_lock[user_id] = False 
 
 # 5. إشعار الأدمن
 def notify_admin_recharge_request(user, request_id, amount_syp, proof_type, proof_content, address_id):
@@ -2988,6 +3030,7 @@ def accept_recharge(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('approve_recharge_', 'reject_recharge_')))
 def handle_recharge_decision(call):
+    user_id = None
     try:
         parts = call.data.split('_')
         action = parts[0]
@@ -3075,7 +3118,9 @@ def handle_recharge_decision(call):
     except Exception as e:
         print(f"Error in handle_recharge_decision: {str(e)}")
         bot.answer_callback_query(call.id, "❌ حدث خطأ أثناء المعالجة.")
-
+    finally:
+        if user_id:
+            user_processing_lock[user_id] = False
 @bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_product_'))
 def confirm_product_requires_id(call):
     parts = call.data.split('_')
