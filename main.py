@@ -13,7 +13,7 @@ from telebot import types
 from datetime import datetime
 from threading import Lock
 from dotenv import load_dotenv
-
+DB_PATH = '/data/wallet.db'
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 ADMIN_ID = 5134156042 # تأكد من أن هذا هو ID الأدمن الخاص بك
@@ -80,14 +80,14 @@ update_thread.daemon = True
 update_thread.start()
 
 # ============= إعداد قاعدة البيانات =============
-if os.name == 'nt': # 'nt' هو الاسم الرمزي لنظام ويندوز
+"""if os.name == 'nt': # 'nt' هو الاسم الرمزي لنظام ويندوز
     # هذا المسار سيعمل عند تشغيل البوت على جهازك المحلي
     print("Running on Windows, using local DB path.")
     DB_PATH = 'wallet.db'
 else:
     # هذا المسار سيعمل عند رفع البوت على الخادم (Railway)
     print("Running on a non-Windows OS (like Railway), using volume path.")
-    DB_PATH = '/data/wallet.db'
+    DB_PATH = '/data/wallet.db'"""
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 db_lock = Lock()
 
